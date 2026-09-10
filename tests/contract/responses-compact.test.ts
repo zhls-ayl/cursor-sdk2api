@@ -44,6 +44,22 @@ function sendCount(): number {
   return ctx.sdk.agents.reduce((sum, agent) => sum + agent.runs.length, 0);
 }
 
+/** Flip a MAC byte. Last-char substitution can keep the same HMAC (~6%) because SHA-256 base64url has unused bits. */
+function tamperCompactMac(token: string): string {
+  if (!token.startsWith(COMPACT_TOKEN_PREFIX)) {
+    throw new Error("expected a gateway compact token");
+  }
+  const rest = token.slice(COMPACT_TOKEN_PREFIX.length);
+  const dot = rest.lastIndexOf(".");
+  if (dot <= 0 || dot === rest.length - 1) {
+    throw new Error("expected payload.mac compact token");
+  }
+  const mac = Buffer.from(rest.slice(dot + 1), "base64url");
+  if (mac.length === 0) throw new Error("expected compact MAC");
+  mac.writeUInt8(mac.readUInt8(0) ^ 0xff, 0);
+  return `${COMPACT_TOKEN_PREFIX}${rest.slice(0, dot)}.${mac.toString("base64url")}`;
+}
+
 test("POST /v1/responses/compact returns exactly one csgw1 item without SDK send", async () => {
   ctx = await startTestApp({
     sdk: { scripts: [[{ type: "text", chunks: ["should not run"] }]] },
@@ -180,7 +196,7 @@ test("tampered, cross-account, and cross-profile compact anchors fail closed", a
     body: JSON.stringify({
       model: "composer-2.5",
       input: [
-        { type: "compaction", encrypted_content: `${token.slice(0, -1)}x` },
+        { type: "compaction", encrypted_content: tamperCompactMac(token) },
         { type: "input_text", text: "continue" },
       ],
     }),
