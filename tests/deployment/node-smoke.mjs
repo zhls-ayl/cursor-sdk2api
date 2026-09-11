@@ -145,8 +145,11 @@ async function runScenario(scenario) {
     const models = await request("/v1/models", {
       headers: { authorization: `Bearer ${syntheticKey}` },
     });
-    assert.equal(models.status, 200, `${scenario}: configured gateway key must be accepted`);
-    assert.deepEqual(await models.json(), {
+    assert.equal(models.status, 503, `${scenario}: authenticated empty pool must report catalog unavailability`);
+    const { error: catalogError, ...catalog } = await models.json();
+    assert.equal(catalogError.type, "api_error");
+    assert.equal(catalogError.code, "cursor_upstream_error");
+    assert.deepEqual(catalog, {
       object: "list",
       data: [],
       status: "unavailable",
