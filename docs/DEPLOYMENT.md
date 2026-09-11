@@ -90,6 +90,51 @@ After building, `node tests/deployment/node-smoke.mjs` checks the packaged Node
 service with temporary state and synthetic configuration. CI also starts the
 built image through the credential-free container smoke before release.
 
+## Request capacity and timing
+
+The default limits are development admission settings, not measured Cursor account
+capacity. Tune them using representative load, error rates, latency, and process
+memory; increasing the number of accounts does not raise the global limit.
+Compose forwards the settings below from its environment or `.env` file.
+
+| Setting | Default | Meaning |
+|---|---:|---|
+| `GLOBAL_ACTIVE_RUNS` | 4 | New execution admission across this process |
+| `PER_CREDENTIAL_ACTIVE_RUNS` | 2 | New execution admission per credential and runtime profile |
+| `MAX_AWAITING_SESSIONS` | 32 | Reject new sessions when this many are already waiting for tools |
+| `FIRST_EVENT_TIMEOUT_MS` | 40000 | Sand grant/SDK startup plus the remaining first-event wait |
+| `TOOL_BATCH_SETTLE_MS` | 1500 | Wait after the last tool callback to collect a complete batch |
+| `CATALOG_CACHE_MS` | 300000 | Fresh model catalog TTL, starting at successful refresh completion |
+| `CATALOG_REFRESH_TIMEOUT_MS` | 5000 | Maximum wait for a shared model catalog refresh |
+| `CATALOG_RETRY_MS` | 5000 | Minimum retry interval after catalog failure |
+| `CATALOG_MAX_STALE_MS` | 300000 | Additional stale fallback window after fresh TTL; 0 disables it |
+
+Active admission counts `creating`, `running`, and `resuming`. A tool wait releases
+the active slot while retaining the SDK Run/Agent and pending callbacks. Live tool
+results can resume an already accepted Run even at capacity, including during
+drain. Thus these settings are admission thresholds, not hard bounds on every
+instantaneous state count. New requests over capacity receive `429` immediately;
+there is no gateway waiting queue.
+
+When SDK startup is interrupted, the same logical request cannot start again
+until the original operation and its late resource cleanup settle. Pending startup
+work retains its admission budget during this period. A cleanup failure leaves
+that retry blocked because cancellation was not confirmed; starting another Run
+would risk overlapping upstream execution.
+
+The SDK model-list API has no cancellation signal. After a refresh timeout, later
+requests reuse its failure/stale result without starting overlapping queries for
+that credential. A permanently hung query requires its transport to settle or a
+gateway restart before another refresh can start. Stale fallback always expires
+at the configured age; it cannot extend indefinitely through repeated failures.
+
+Inference and compact endpoints emit one numeric `request completed` log with
+`request_id`, protocol `path`, `http_status`, `outcome`, and `duration_ms`.
+`first_write_ms` is included only if a response body was written; it measures the
+first local HTTP write, including SSE lifecycle frames, and is not model TTFT or
+client-observed network latency. Client disconnects are recorded as `499` without
+inventing a first-write time. Request and response bodies are not logged.
+
 ## GHCR releases
 
 An approved `v<package-version>` tag runs the release workflow. It re-runs the

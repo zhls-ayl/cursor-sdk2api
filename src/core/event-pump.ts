@@ -27,6 +27,8 @@ export class EventPump {
   private finished = false;
   private consumer: Promise<void> | undefined;
   private firstEvent = false;
+  private firstEventTimer?: AbortController;
+  private settleTimer?: AbortController;
   private text = "";
   private thinking = "";
   private error: unknown;
@@ -91,10 +93,12 @@ export class EventPump {
       this.fail(error);
       return;
     }
-    this.firstEvent = true;
+    this.noteFirstEvent();
     this.session.hasSemanticOutput = true;
     this.session.sawToolBatch = true;
     this.openBatch.push(call);
+    this.settleTimer?.abort();
+    this.settleTimer = undefined;
     const generation = ++this.settleGeneration;
     const flush = () => {
       if (generation !== this.settleGeneration || this.finished) return;
@@ -104,7 +108,9 @@ export class EventPump {
       queueMicrotask(flush);
       return;
     }
-    void this.clock.sleep(this.settleMs).then(flush);
+    const timer = new AbortController();
+    this.settleTimer = timer;
+    void this.clock.sleep(this.settleMs, timer.signal).then(flush, () => undefined);
   }
 
   waitForBoundary(): Promise<PumpBoundary> {
@@ -122,14 +128,14 @@ export class EventPump {
 
   ingestDelta(update: SdkDeltaUpdate): void {
     if (update.type === "turn-ended") {
-      this.firstEvent = true;
+      this.noteFirstEvent();
       // Per-turn usage is diagnostic only. Cumulative usage is confirmed via run.wait().
       return;
     }
     if (update.type !== "text-delta" && update.type !== "thinking-delta") return;
     if (!update.text) return;
     this.preferOnDelta = true;
-    this.firstEvent = true;
+    this.noteFirstEvent();
     this.session.hasSemanticOutput = true;
     if (update.type === "thinking-delta") {
       this.thinking += update.text;
@@ -147,18 +153,22 @@ export class EventPump {
   }
 
   private async loop(): Promise<void> {
-    const firstTimer = this.clock.sleep(this.firstEventTimeoutMs).then(() => {
-      if (!this.firstEvent && !this.finished) {
-        this.fail(timeoutError("Timed out waiting for the first SDK event"));
-      }
-    });
+    if (!this.firstEvent && !this.finished) {
+      const timer = new AbortController();
+      this.firstEventTimer = timer;
+      void this.clock.sleep(this.firstEventTimeoutMs, timer.signal).then(() => {
+        if (!this.firstEvent && !this.finished) {
+          this.fail(timeoutError("Timed out waiting for the first SDK event"));
+        }
+      }, () => undefined);
+    }
     try {
       for await (const event of this.run.stream()) {
-        this.firstEvent = true;
+        this.noteFirstEvent();
         this.handle(event);
       }
       // Stream EOF is progress; do not empty-fail before wait().
-      this.firstEvent = true;
+      this.noteFirstEvent();
       const result = await this.run.wait();
       if (this.finished) return;
       if (result.status === "error") {
@@ -200,8 +210,21 @@ export class EventPump {
       this.fail(sdkFailure(error));
     } finally {
       this.finished = true;
-      void firstTimer;
+      this.clearTimers();
     }
+  }
+
+  private noteFirstEvent(): void {
+    this.firstEvent = true;
+    this.firstEventTimer?.abort();
+    this.firstEventTimer = undefined;
+  }
+
+  private clearTimers(): void {
+    this.firstEventTimer?.abort();
+    this.firstEventTimer = undefined;
+    this.settleTimer?.abort();
+    this.settleTimer = undefined;
   }
 
   private handle(event: SdkStreamEvent): void {
@@ -261,6 +284,7 @@ export class EventPump {
   }
 
   private publish(boundary: PumpBoundary): void {
+    this.clearTimers();
     if (boundary.type === "final") this.finished = true;
     this.publishedBoundary = boundary;
     const waiters = this.boundaryWaiters;

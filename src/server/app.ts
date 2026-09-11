@@ -19,6 +19,7 @@ import type { Clock } from "../clock.js";
 import type { GatewayConfig } from "../config.js";
 import { CompactAnchorStore } from "../core/compact-anchor.js";
 import { RunCoordinator } from "../core/run-coordinator.js";
+import { SdkStartupInterruptedError } from "../core/sdk-run-driver.js";
 import type { PumpBoundary } from "../core/event-pump.js";
 import { LineageStore } from "../core/lineage-store.js";
 import { OrdinaryTurnJournal } from "../core/ordinary-turn-journal.js";
@@ -58,6 +59,8 @@ import { ModelCatalog } from "../sdk/catalog.js";
 import { headerValue, readJsonBody, requestPath, sendError, sendJson, sendOpenAIError } from "./http-util.js";
 import { serveConsole } from "./console.js";
 import { requireLoopbackOperator } from "./loopback.js";
+import { OrdinaryAccountRouting } from "./ordinary-account-routing.js";
+import { startRequestMetrics } from "./request-metrics.js";
 
 export interface App {
   config: GatewayConfig;
@@ -113,6 +116,7 @@ async function listManagedModels(accounts: StoredCursorAccount[], catalog: Model
 }
 
 function managedPreSemanticFailureCanFailover(error: unknown): boolean {
+  if (error instanceof SdkStartupInterruptedError) return false;
   if (!(error instanceof GatewayError)) return true;
   if (
     error.code === "authentication_error" ||
@@ -183,7 +187,12 @@ export function createApp(input: {
     assertSandAccess,
     beforeApplyBoundary,
   });
-  const catalog = new ModelCatalog(sdk, clock, config.catalogCacheMs);
+  const catalog = new ModelCatalog(sdk, clock, config.catalogCacheMs, {
+    refreshTimeoutMs: config.catalogRefreshTimeoutMs,
+    retryMs: config.catalogRetryMs,
+    maxStaleMs: config.catalogMaxStaleMs,
+  });
+  const ordinaryRouting = new OrdinaryAccountRouting(ordinaryJournal);
   const accounts = new CursorAccountFileStore(config.stateDir, config.managedCursorKey);
   const accountPool = new CursorAccountPool();
   const accountPayload = (apiKey: string, defaultProfile?: RuntimeProfile) =>
@@ -214,9 +223,11 @@ export function createApp(input: {
   };
 
   const resolveManagedAuth = async (
+    req: IncomingMessage,
     parsed?: ParsedMessages,
     sessionHint?: string,
     excludedFingerprints: ReadonlySet<string> = new Set(),
+    routeReleases?: Array<() => void>,
   ): Promise<AuthContext> => {
     const boundFingerprint = parsed ? boundCredentialFingerprint(parsed, sessionHint) : undefined;
     if (boundFingerprint && !excludedFingerprints.has(boundFingerprint)) {
@@ -234,6 +245,26 @@ export function createApp(input: {
     if (configured.length === 0) {
       throw upstreamError("No Cursor accounts are configured in the gateway pool", 503);
     }
+    const canRouteOrdinary = Boolean(config.ordinaryTurnCoordinator && parsed && !parsed.continuation && !sessionHint);
+    const ordinaryRequest = canRouteOrdinary && parsed ? ordinaryRouting.forRequest(parsed) : undefined;
+    const profileForAccount = (auth: AuthContext) => runtimeProfileFor(req, { mode: "managed" }, auth);
+    const claimAuth = (auth: AuthContext): AuthContext => {
+      if (ordinaryRequest && routeReleases) {
+        routeReleases.push(ordinaryRequest.claim({ auth, profile: profileForAccount(auth) }));
+      }
+      return auth;
+    };
+    const findOrdinaryOwner = (): AuthContext | undefined => {
+      if (!ordinaryRequest) return undefined;
+      return ordinaryRequest.findOwner(configured.flatMap((account) => {
+        const auth = managedAccountAuth(account.apiKey, account.defaultProfile);
+        return excludedFingerprints.has(auth.fingerprint) ? [] : [{ auth, profile: profileForAccount(auth) }];
+      }));
+    };
+    // Exact replay and singleflight do not need a new capacity slot. Successor
+    // admission remains in the coordinator so its normal failover policy applies.
+    const ordinaryOwner = findOrdinaryOwner();
+    if (ordinaryOwner) return claimAuth(ordinaryOwner);
     let candidates = configured;
     if (parsed) {
       const checked = await Promise.all(
@@ -253,12 +284,21 @@ export function createApp(input: {
       }
     }
 
-    candidates = candidates.filter(
-      (account) =>
-        !excludedFingerprints.has(managedAccountAuth(account.apiKey).fingerprint) &&
-        registry.activeRunCountForCredential(managedAccountAuth(account.apiKey).fingerprint) <
-        config.perCredentialActiveRuns,
-    );
+    // Catalog refresh can yield; a concurrent request may have claimed the
+    // ordinary turn while this request was awaiting the same model catalog.
+    const refreshedOwner = findOrdinaryOwner();
+    if (refreshedOwner) return claimAuth(refreshedOwner);
+    registry.sweep();
+    candidates = candidates.filter((account) => {
+      const auth = managedAccountAuth(account.apiKey, account.defaultProfile);
+      const profile = profileForAccount(auth);
+      const active = [...registry.sessions.values()].filter((session) =>
+        session.credentialFingerprint === auth.fingerprint &&
+        session.runtimeProfile === profile &&
+        ["creating", "running", "resuming"].includes(session.state),
+      ).length;
+      return !excludedFingerprints.has(auth.fingerprint) && active < config.perCredentialActiveRuns;
+    });
     if (candidates.length === 0) {
       throw rateLimited(
         parsed
@@ -269,17 +309,19 @@ export function createApp(input: {
 
     const selected = accountPool.pick(candidates, parsed?.model ?? "account");
     if (!selected) throw upstreamError("No Cursor account is available", 503);
-    return managedAccountAuth(selected.apiKey, selected.defaultProfile);
+    return claimAuth(managedAccountAuth(selected.apiKey, selected.defaultProfile));
   };
 
   const resolveAuth = async (
+    req: IncomingMessage,
     client: ClientAuthorization,
     parsed?: ParsedMessages,
     sessionHint?: string,
     excludedFingerprints: ReadonlySet<string> = new Set(),
+    routeReleases?: Array<() => void>,
   ): Promise<AuthContext> => client.mode === "byok"
     ? client.auth
-    : resolveManagedAuth(parsed, sessionHint, excludedFingerprints);
+    : resolveManagedAuth(req, parsed, sessionHint, excludedFingerprints, routeReleases);
   const credentialProbes = new Map<string, Promise<"valid" | "invalid" | "unavailable">>();
   const probeCredential = (auth: AuthContext): Promise<"valid" | "invalid" | "unavailable"> => {
     const existing = credentialProbes.get(auth.fingerprint);
@@ -293,51 +335,71 @@ export function createApp(input: {
   };
 
   const runWithProviderRecovery = async (
+    req: IncomingMessage,
     res: ServerResponse,
     client: ClientAuthorization,
     parsed: ParsedMessages,
     sessionHint: string | undefined,
     run: (auth: AuthContext) => Promise<void>,
   ): Promise<void> => {
-    const first = await resolveAuth(client, parsed, sessionHint);
+    const routeReleases: Array<() => void> = [];
+    let pendingSettlement: Promise<void> | undefined;
+    const assertClientConnected = () => {
+      if (req.aborted || res.destroyed) throw new GatewayError("client_closed", "Client disconnected before SDK execution", 499);
+    };
     try {
-      await run(first);
-      return;
-    } catch (initialError) {
-      let error = initialError;
-      if (!responseStarted(res) && staleCredentialSessionError(error)) {
-        const probe = await probeCredential(first);
-        if (probe === "valid") {
-          logger.warn(
-            { model: parsed.model, error_type: "authentication_error" },
-            "retrying pre-semantic Cursor request after credential probe",
-          );
-          try {
-            await run(first);
-            return;
-          } catch (retryError) {
-            error = retryError;
+      const first = await resolveAuth(req, client, parsed, sessionHint, new Set(), routeReleases);
+      assertClientConnected();
+      try {
+        await run(first);
+        return;
+      } catch (initialError) {
+        let error = initialError;
+        if (!responseStarted(res) && staleCredentialSessionError(error)) {
+          const probe = await probeCredential(first);
+          if (probe === "valid") {
+            logger.warn(
+              { model: parsed.model, error_type: "authentication_error" },
+              "retrying pre-semantic Cursor request after credential probe",
+            );
+            try {
+              assertClientConnected();
+              await run(first);
+              return;
+            } catch (retryError) {
+              error = retryError;
+            }
           }
         }
+        if (
+          client.mode !== "managed" ||
+          responseStarted(res) ||
+          !managedPreSemanticFailureCanFailover(error)
+        ) {
+          throw error;
+        }
+        let alternate: AuthContext;
+        try {
+          alternate = await resolveAuth(req, client, parsed, sessionHint, new Set([first.fingerprint]), routeReleases);
+        } catch {
+          throw error;
+        }
+        logger.warn(
+          { model: parsed.model, error_type: error instanceof GatewayError ? error.code : "cursor_upstream_error" },
+          "retrying pre-semantic Cursor request on another managed account",
+        );
+        assertClientConnected();
+        await run(alternate);
       }
-      if (
-        client.mode !== "managed" ||
-        responseStarted(res) ||
-        !managedPreSemanticFailureCanFailover(error)
-      ) {
-        throw error;
-      }
-      let alternate: AuthContext;
-      try {
-        alternate = await resolveAuth(client, parsed, sessionHint, new Set([first.fingerprint]));
-      } catch {
-        throw error;
-      }
-      logger.warn(
-        { model: parsed.model, error_type: error instanceof GatewayError ? error.code : "cursor_upstream_error" },
-        "retrying pre-semantic Cursor request on another managed account",
-      );
-      await run(alternate);
+    } catch (error) {
+      if (error instanceof SdkStartupInterruptedError) pendingSettlement = error.pendingSettlement;
+      throw error;
+    } finally {
+      const releaseRoutes = () => { for (const release of routeReleases) release(); };
+      // A timed-out SDK startup can still be running upstream. Keep duplicate
+      // managed requests on that credential until the driver cleans it up.
+      if (pendingSettlement) void pendingSettlement.then(releaseRoutes, releaseRoutes);
+      else releaseRoutes();
     }
   };
 
@@ -373,6 +435,9 @@ export function createApp(input: {
     const method = (req.method ?? "GET").toUpperCase();
     try {
       path = requestPath(req);
+      if (method === "POST" && ["/v1/messages", "/v1/chat/completions", "/v1/responses", "/v1/responses/compact"].includes(path)) {
+        startRequestMetrics(res, { clock, logger, requestId, path });
+      }
       requireLoopbackOperator(req, path);
       if (
         (method === "GET" || method === "HEAD") &&
@@ -662,7 +727,7 @@ export function createApp(input: {
         if (body === undefined) throw invalidRequest("JSON body is required");
         const parsed = parseMessagesRequest(body);
         const sessionHint = headerValue(req, "x-cursor-session-id");
-        await runWithProviderRecovery(res, client, parsed, sessionHint, (auth) =>
+        await runWithProviderRecovery(req, res, client, parsed, sessionHint, (auth) =>
           coordinator.handleMessages(req, res, auth, parsed, requestId, sessionHint));
         return;
       }
@@ -673,7 +738,7 @@ export function createApp(input: {
         if (body === undefined) throw invalidRequest("JSON body is required");
         const chat = parseChatCompletionsRequest(body);
         const sessionHint = headerValue(req, "x-cursor-session-id");
-        await runWithProviderRecovery(res, client, chat.parsed, sessionHint, (auth) =>
+        await runWithProviderRecovery(req, res, client, chat.parsed, sessionHint, (auth) =>
           coordinator.handleMessages(
             req,
             res,
@@ -695,7 +760,7 @@ export function createApp(input: {
         });
         const sessionHint = headerValue(req, "x-cursor-session-id");
         if (responses.compaction.trigger) {
-          const auth = await resolveAuth(client, responses.parsed, sessionHint);
+          const auth = await resolveAuth(req, client, responses.parsed, sessionHint);
           const minted = mintLocalCompact({
             store: compactStore,
             account: auth.fingerprint,
@@ -715,7 +780,7 @@ export function createApp(input: {
           });
           return;
         }
-        await runWithProviderRecovery(res, client, responses.parsed, sessionHint, (auth) => {
+        await runWithProviderRecovery(req, res, client, responses.parsed, sessionHint, (auth) => {
           let hint = sessionHint;
           if (responses.compaction.encryptedContent) {
             const bound = bindCompactContinuation({
@@ -748,7 +813,7 @@ export function createApp(input: {
           hostedSearchMode: config.runtimePolicy.hostedSearchMode,
         });
         const sessionHint = headerValue(req, "x-cursor-session-id");
-        const auth = await resolveAuth(client, responses.parsed, sessionHint);
+        const auth = await resolveAuth(req, client, responses.parsed, sessionHint);
         const minted = mintLocalCompact({
           store: compactStore,
           account: auth.fingerprint,

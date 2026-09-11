@@ -55,11 +55,41 @@ SDK Agent history lives in credential-partitioned `$STATE_DIR/sdk-store/<fingerp
 
 Ordinary multi-turn requests without `x-cursor-session-id` use a credential-free journal of digests (`STATE_DIR/ordinary-turns.json`). Exact linear successors reuse the same Agent and `send()` only the latest user text/images. Forks, compact/missing anchors, model/effort/tool-catalog mismatches, and credential rotation cold-rebuild. Identical request digests replay in-process; after a process restart they fail closed because assistant bodies are not persisted.
 
+In managed mode, account selection checks exact ordinary-turn journal ownership
+before round-robin. Matching includes the actual credential and effective runtime
+profile, so a headerless successor or duplicate can reach its existing coordinator.
+A short-lived routing claim covers concurrent requests while catalog lookup yields;
+it selects an account only and does not introduce another execution or replay engine.
+Ambiguous ownership fails closed. New and forked conversations still use the pool.
+
 Completed follow-up with `x-cursor-session-id` looks up lineage, checks credential/model/session policy, then `Agent.resume` + `send` on that same store. `ORDINARY_TURN_COORDINATOR=0` restores the previous flatten-every-turn path. Pending callback Promises are not serialized; the lineage stores only tool ids, names, and policy digests. After owner death, an exact credential/model/tool-catalog/tool-id batch resumes the persisted Agent and sends a synthetic host-recovery turn with `local.force=true`. Concurrent duplicate-same recovery is singleflight. Assistant replay bodies are not persisted, so duplicate-same after a later process restart still has no persisted response body.
 
 When no exact live or persisted owner can attach, tool continuation may cold-branch only from a self-contained transcript. The latest assistant tool batch must exactly match the submitted result ids and every call must exist in the request catalog. Historical completed calls are indexed by stable tool-name/input signature; if the recovered Harness requests one again, the gateway returns the recorded result internally rather than exposing the same side effect to the client twice. Identical recovery requests are singleflight and replayable for the normal replay TTL.
 
 Before any semantic response is emitted, a generic SDK authentication-session failure is checked with an official `Cursor.me` credential probe. A still-valid key receives one same-credential Agent rebuild; an invalid key fails immediately. Managed mode may then try one different compatible account for authentication, permission, rate-limit, timeout, or upstream failures. No retry occurs after response headers/deltas begin.
+
+`FIRST_EVENT_TIMEOUT_MS` covers Sand grant checks, SDK create/resume/send, and the remaining wait for
+the first SDK event. Disconnect observation starts before SDK startup, checks an
+already-closed response, and is removed after each HTTP response. An interrupted
+startup cannot trigger account failover: the SDK startup APIs have no cancellation
+signal, so the gateway blocks later stages and closes/cancels any late Agent/Run.
+The same logical request stays blocked and its managed account routing claim is
+retained until pending startup and late cleanup finish. Unsettled startup work
+also retains admission capacity, even though its HTTP response has ended.
+After a durable ledger Run is bound, the existing observe-after-disconnect contract
+still applies. Shared tool recovery remains owned by its singleflight operation;
+one disconnected subscriber does not cancel that shared startup.
+
+Model catalogs use per-credential singleflight, a refresh deadline, failure retry
+backoff, and bounded stale fallback. A timed-out SDK query keeps its key locked
+until the underlying Promise settles; late results are ignored. This prevents
+overlapping queries when the SDK transport hangs. Catalog data is capability
+metadata and never replaces upstream credential checks.
+
+Tool batch publication still waits `TOOL_BATCH_SETTLE_MS` after the last callback.
+The SDK's usage-only `turn-ended` update and prompt-level serial-tool directive do
+not establish that all custom-tool callbacks have arrived. Superseded debounce
+timers and satisfied first-event timers are cancelled immediately.
 
 ## Injection
 

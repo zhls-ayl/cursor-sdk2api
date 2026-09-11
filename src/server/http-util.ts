@@ -1,4 +1,5 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { markFirstResponseWrite } from "./request-metrics.js";
 import {
   GatewayError,
   httpStatusOf,
@@ -59,6 +60,7 @@ export function sendJson(
     "cache-control": "no-store",
     ...extraHeaders,
   });
+  markFirstResponseWrite(res);
   res.end(payload);
 }
 
@@ -72,12 +74,14 @@ export function sendOpenAIError(res: ServerResponse, error: unknown, requestId: 
 }
 
 export function writeSse(res: ServerResponse, event: string, data: unknown): void {
+  markFirstResponseWrite(res);
   res.write(`event: ${event}\n`);
   res.write(`data: ${JSON.stringify(data)}\n\n`);
 }
 
 /** OpenAI-style SSE: `data: ...\\n\\n` only, no Anthropic `event:` names. */
 export function writeDataFrame(res: ServerResponse, data: unknown | "[DONE]"): void {
+  markFirstResponseWrite(res);
   if (data === "[DONE]") {
     res.write("data: [DONE]\n\n");
     return;

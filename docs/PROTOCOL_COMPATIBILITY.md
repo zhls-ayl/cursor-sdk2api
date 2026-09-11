@@ -46,6 +46,11 @@ Managed mode follows CPA's separation of proxy client keys from upstream
 credentials. A valid `GATEWAY_ACCESS_KEY` selects compatible accounts with
 round-robin for new sessions. Pending tool IDs and `x-cursor-session-id` bind
 continuation to the original account, including persisted restart recovery.
+Headerless ordinary successors and duplicate requests also select their exact
+existing journal owner before round-robin, preserving Agent reuse and coordinator
+singleflight/replay across a managed pool. Credential, model, transcript, tools,
+session policy, and effective runtime profile must still match; ambiguous account
+ownership is `409 cursor_session_conflict`.
 
 ## Responses continuation identity
 

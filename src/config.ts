@@ -34,6 +34,9 @@ export interface GatewayConfig {
   ordinaryTurnCoordinator: boolean;
   toolBatchSettleMs: number;
   catalogCacheMs: number;
+  catalogRefreshTimeoutMs: number;
+  catalogRetryMs: number;
+  catalogMaxStaleMs: number;
   sweepIntervalMs: number;
   maxBodyBytes: number;
   emptyWorkspaceDir?: string;
@@ -143,6 +146,9 @@ export function loadConfig(overrides: Partial<GatewayConfig> = {}): GatewayConfi
     ),
     toolBatchSettleMs: envInt("TOOL_BATCH_SETTLE_MS", 1_500),
     catalogCacheMs: envInt("CATALOG_CACHE_MS", 5 * 60_000),
+    catalogRefreshTimeoutMs: envInt("CATALOG_REFRESH_TIMEOUT_MS", 5_000),
+    catalogRetryMs: envInt("CATALOG_RETRY_MS", 5_000),
+    catalogMaxStaleMs: envInt("CATALOG_MAX_STALE_MS", 5 * 60_000),
     sweepIntervalMs: envInt("SWEEP_INTERVAL_MS", 5_000),
     maxBodyBytes: envInt("MAX_BODY_BYTES", 2 * 1024 * 1024),
     emptyWorkspaceDir: process.env.EMPTY_WORKSPACE_DIR || undefined,

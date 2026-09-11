@@ -9,6 +9,7 @@ import {
   GatewayError,
   forbiddenError,
   invalidRequest,
+  rateLimited,
   sdkFailure,
   sessionConflict,
   sessionLost,
@@ -32,7 +33,7 @@ import { decideOrdinaryTurn } from "./ordinary-turn.js";
 import type { OrdinaryTurnJournal, OrdinaryTurnRecord } from "./ordinary-turn-journal.js";
 import { Session } from "./session.js";
 import { SessionRegistry } from "./session-registry.js";
-import { SdkRunDriver, type DriveSdkRunInput, type SdkAgentSource } from "./sdk-run-driver.js";
+import { SdkRunDriver, SdkStartupInterruptedError, type DriveSdkRunInput, type SdkAgentSource } from "./sdk-run-driver.js";
 import { batchDigest } from "./tool-bridge.js";
 import { buildTranscriptRecovery } from "./transcript-recovery.js";
 import type { LineageRecord, LineageStore } from "./lineage-store.js";
@@ -115,6 +116,7 @@ export class RunCoordinator {
   >();
   private readonly ordinaryInflight = new Map<string, Promise<void>>();
   private readonly ordinaryReplay = new Map<string, OrdinaryReplayEntry>();
+  private readonly unsettledStartups = new Map<string, { error: SdkStartupInterruptedError; session: Session }>();
   private readonly sdkRunDriver: SdkRunDriver;
 
   constructor(private readonly deps: CoordinatorDeps) {
@@ -599,6 +601,7 @@ export class RunCoordinator {
           send: prompt,
         },
         logicalKey,
+        { req, res },
       );
       session.state = "running";
       await this.drive(req, res, session, pump, parsed.stream, requestId, writerFactory);
@@ -658,6 +661,7 @@ export class RunCoordinator {
           afterAgentReady: options.afterAgentReady,
         },
         logicalKey,
+        { req, res },
       );
       await this.drive(req, res, session, pump, parsed.stream, requestId, writerFactory);
     } catch (error) {
@@ -1011,16 +1015,17 @@ export class RunCoordinator {
       session,
       messageId: pump.currentMessageId(),
     });
-    pump.attach(writer);
-    pump.start();
-    this.watchDisconnect(req, res, session, writer);
+    const unwatch = this.watchDisconnect(req, res, session, writer);
     try {
+      pump.attach(writer);
+      pump.start();
       const boundary = await pump.waitForBoundary();
       if (this.deps.beforeApplyBoundary) {
         await this.deps.beforeApplyBoundary(boundary);
       }
       await this.applyBoundary(res, session, boundary, writer);
     } finally {
+      unwatch();
       pump.detach(writer);
     }
   }
@@ -1297,12 +1302,62 @@ export class RunCoordinator {
     return undefined;
   }
 
-  private async startAndBind(input: DriveSdkRunInput, logicalKey: string): Promise<EventPump> {
+  private async startAndBind(
+    input: DriveSdkRunInput,
+    logicalKey: string,
+    client?: { req: IncomingMessage; res: ServerResponse },
+  ): Promise<EventPump> {
     input.session.logicalKey = logicalKey;
-    await this.ensureSandRun(input);
-    const pump = await this.sdkRunDriver.start(input);
-    this.bindLedgerAfterSend(input.session, logicalKey);
-    return pump;
+    const startupKey = `${input.session.credentialFingerprint}:${input.session.runtimeProfile}:${logicalKey}`;
+    const unsettled = this.unsettledStartups.get(startupKey);
+    if (unsettled) throw unsettled.error;
+    this.assertStartupCapacity(input.session);
+    const abort = new AbortController();
+    // Shared tool recovery has multiple HTTP subscribers. Its startup is bounded
+    // by the driver deadline, but one subscriber cannot cancel the shared owner.
+    const unwatch = client
+      ? this.observeDisconnect(client.req, client.res, () => abort.abort())
+      : () => undefined;
+    try {
+      if (abort.signal.aborted) throw new SdkStartupInterruptedError("client_closed");
+      const pump = await this.sdkRunDriver.start({
+        ...input,
+        signal: abort.signal,
+        beforeAgentStart: () => this.ensureSandRun(input),
+      });
+      this.bindLedgerAfterSend(input.session, logicalKey);
+      return pump;
+    } catch (error) {
+      if (error instanceof SdkStartupInterruptedError) {
+        this.unsettledStartups.set(startupKey, { error, session: input.session });
+        void error.pendingSettlement.then(() => {
+          if (this.unsettledStartups.get(startupKey)?.error === error) this.unsettledStartups.delete(startupKey);
+        });
+      }
+      throw error;
+    } finally {
+      unwatch();
+    }
+  }
+
+  private assertStartupCapacity(session: Session): void {
+    const occupied = new Set([...this.deps.registry.sessions.values()].filter((item) =>
+      item !== session && (item.state === "creating" || item.state === "running" || item.state === "resuming"),
+    ));
+    // A completed HTTP error does not mean its pending SDK operation released
+    // resources. Count that owner once until its late cleanup actually settles.
+    for (const pending of this.unsettledStartups.values()) {
+      if (pending.session !== session) occupied.add(pending.session);
+    }
+    if (occupied.size >= this.deps.config.globalActiveRuns) {
+      throw rateLimited("Global active run limit reached (including pending SDK startup cleanup)");
+    }
+    const perCredential = [...occupied].filter((item) =>
+      item.credentialFingerprint === session.credentialFingerprint && item.runtimeProfile === session.runtimeProfile,
+    );
+    if (perCredential.length >= this.deps.config.perCredentialActiveRuns) {
+      throw rateLimited("Per-credential active run limit reached (including pending SDK startup cleanup)");
+    }
   }
 
   private requestProfile(req: IncomingMessage, auth: AuthContext): RuntimeProfile {
@@ -1530,26 +1585,37 @@ export class RunCoordinator {
     res: ServerResponse,
     session: Session,
     writer: TurnWriter,
-  ): void {
+  ): () => void {
     const onClientGone = () => {
       session.pump?.detach(writer);
       if (res.writableEnded) return;
       if (this.ledgerEnabled() && this.runIsBound(session)) return;
       if (!session.hasSemanticOutput && (session.state === "running" || session.state === "creating")) {
-        void this.cancel(session, "client_closed_before_output");
+        this.deps.registry.forget(session, "client_closed_before_output");
       }
     };
-    req.once("aborted", onClientGone);
-    req.socket?.once("close", onClientGone);
+    return this.observeDisconnect(req, res, onClientGone);
   }
 
-  private async cancel(session: Session, reason: string): Promise<void> {
-    try {
-      await session.run?.cancel();
-    } catch {
-      // ignore cancel races
-    }
-    this.deps.registry.forget(session, reason);
+  private observeDisconnect(
+    req: IncomingMessage,
+    res: ServerResponse,
+    onClientGone: () => void,
+  ): () => void {
+    const cleanup = () => {
+      req.off("aborted", onClose);
+      res.off("close", onClose);
+      res.off("finish", cleanup);
+    };
+    const onClose = () => {
+      cleanup();
+      if (!res.writableEnded) onClientGone();
+    };
+    req.once("aborted", onClose);
+    res.once("close", onClose);
+    res.once("finish", cleanup);
+    if (req.aborted || req.socket?.destroyed || res.destroyed) onClose();
+    return cleanup;
   }
 
   async drain(deadlineMs: number): Promise<void> {
