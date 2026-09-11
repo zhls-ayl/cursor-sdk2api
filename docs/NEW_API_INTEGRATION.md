@@ -22,11 +22,15 @@ calls, parallel-tool fields, and Responses on their native paths.
 ```bash
 cd integrations/new-api
 cp .env.example .env
+# Set distinct GATEWAY_ACCESS_KEY and CURSOR_API_KEY values before startup.
+chmod 600 .env
 docker compose up -d --build
 ```
 
-Open `http://localhost:3000`, complete new-api's normal first-run setup, and
-open `http://localhost:8080/console/` to import one or more Cursor accounts.
+Open `http://localhost:3000` and complete new-api's normal first-run setup.
+`CURSOR_API_KEY` seeds the gateway pool. Docker bridge port publishing does not
+expose the loopback-only console; additional accounts can be imported through
+the container-local command in [Deployment](DEPLOYMENT.md#docker).
 Then create a new-api user token for client requests. The compose file does not
 create an administrator, token, or channel, and it contains no working secret.
 For a private local smoke, choose new-api's **self-use** mode; current new-api
@@ -89,8 +93,10 @@ bash integrations/new-api/compose-e2e.sh
 ```
 
 This builds a clean local gateway image, starts new-api with a fresh SQLite
-volume, proves both health endpoints, and proves new-api's Docker network can
-reach `gateway:8080`. It does not create a channel or claim a model response.
+volume, checks gateway liveness (`/livez`) and new-api status, and proves
+new-api's Docker network can reach `gateway:8080`. Gateway `/health` remains
+503 until a managed account is configured. It does not create a channel or
+claim a model response.
 
 After channel setup, run the credentialed acceptance matrix through new-api:
 

@@ -12,17 +12,25 @@ export GATEWAY_PORT
 export NEW_API_PORT
 GATEWAY_ACCESS_KEY="compose-e2e-gateway-key"
 export GATEWAY_ACCESS_KEY
+export CURSOR_AUTH_MODE=managed CURSOR_API_KEY=""
+export NEW_API_SESSION_SECRET=compose-e2e-synthetic-session-secret
 COMPOSE_PROJECT_NAME="cursor-sdk2api-e2e-${NEW_API_PORT}"
 export COMPOSE_PROJECT_NAME
 
+compose() {
+  docker compose --env-file /dev/null -f "$compose_file" --profile verify "$@"
+}
+
 cleanup() {
-  docker compose -f "$compose_file" --profile verify down --volumes --remove-orphans
+  compose down --volumes --remove-orphans
 }
 trap cleanup EXIT
 
-docker compose -f "$compose_file" --profile verify up -d --build gateway new-api
-docker compose -f "$compose_file" --profile verify run --rm network-probe
-curl --fail --silent --show-error "http://127.0.0.1:${GATEWAY_PORT}/console/" >/dev/null
+compose up -d --build gateway new-api
+compose run --rm network-probe
+compose exec -T gateway /nodejs/bin/node -e \
+  "fetch('http://127.0.0.1:8080/console/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+test "$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' "http://127.0.0.1:${GATEWAY_PORT}/console/")" = 403
 curl --fail --silent --show-error "http://127.0.0.1:${NEW_API_PORT}/api/status" >/dev/null
 curl --fail --silent --show-error "http://127.0.0.1:${NEW_API_PORT}/" >/dev/null
 echo "new-api compose infrastructure E2E passed"

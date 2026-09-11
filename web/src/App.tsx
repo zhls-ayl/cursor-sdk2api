@@ -38,6 +38,7 @@ const COPY = {
     navPlayMeta: "Messages / Chat / Responses",
     consoleTag: "Local console",
     ready: "Ready",
+    notReady: "Not ready",
     unavailable: "Down",
     loading: "Loading",
     proxy: "Proxy",
@@ -212,6 +213,7 @@ const COPY = {
     navPlayMeta: "Messages / Chat / Responses",
     consoleTag: "本机控制台",
     ready: "就绪",
+    notReady: "未就绪",
     unavailable: "不可用",
     loading: "加载中",
     proxy: "代理",
@@ -411,6 +413,7 @@ export function App() {
       setHealth(await getHealth());
       setHealthError("");
     } catch (error: unknown) {
+      setHealth(undefined);
       setHealthError(messageOf(error));
     } finally {
       setRefreshingHealth(false);
@@ -534,6 +537,7 @@ export function App() {
       setRoster((current) => current.some((item) => item.id === next.id) ? current : [...current, next]);
       setActiveId(next.id);
       setDraftKey("");
+      await refreshHealth();
       await probe(next.id);
     } catch (error) {
       setAddError(messageOf(error));
@@ -558,6 +562,7 @@ export function App() {
       return next;
     });
     if (route.accountId === id) go("accounts");
+    await refreshHealth();
   };
 
   const setAccountProfile = async (id: string, profile: "sdk" | "sand") => {
@@ -601,6 +606,7 @@ export function App() {
   };
 
   const healthOk = health?.status === "ok";
+  const healthLabel = healthOk ? t.ready : health ? t.notReady : healthError ? t.unavailable : t.loading;
   const homeCopy = t.home as unknown as HomeCopy & { add: string; adding: string; keyPlaceholder: string; keyHelp: string; remove: string };
 
   const pageLabel = pageLabelFor(route.page, t);
@@ -640,7 +646,7 @@ export function App() {
           }}
         />
         <div className="rail-foot">
-          <StatusTag tone={healthOk ? "success" : healthError ? "danger" : "progress"}>{healthOk ? t.ready : healthError ? t.unavailable : t.loading}</StatusTag>
+          <StatusTag tone={healthOk ? "success" : healthError || health ? "danger" : "progress"}>{healthLabel}</StatusTag>
           <div className="rail-tools">
             <Button variant="quiet" size="sm" onClick={() => setLanguage(language === "en" ? "zh" : "en")}>{t.language}</Button>
             <Button variant="quiet" size="sm" onClick={() => setTone(tone === "light" ? "dark" : "light")}>{tone === "light" ? t.dark : t.light}</Button>
@@ -664,7 +670,7 @@ export function App() {
             t={homeCopy}
             origin={origin}
             copied={copied}
-            ready={healthOk ? t.ready : healthError ? t.unavailable : t.loading}
+            ready={healthLabel}
             readyOk={healthOk}
             sdk={health?.sdk_version ?? "…"}
             version={health?.version ?? "…"}

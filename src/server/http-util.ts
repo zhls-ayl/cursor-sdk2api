@@ -14,8 +14,12 @@ export function headerValue(req: IncomingMessage, name: string): string | undefi
 }
 
 export function requestPath(req: IncomingMessage): string {
-  const url = new URL(req.url ?? "/", "http://localhost");
-  return url.pathname;
+  try {
+    return new URL(req.url ?? "/", "http://localhost").pathname;
+  } catch {
+    // URL errors retain the raw request target; do not expose or log it.
+    throw invalidRequest("Invalid request target");
+  }
 }
 
 export async function readJsonBody(req: IncomingMessage, maxBytes: number): Promise<unknown> {

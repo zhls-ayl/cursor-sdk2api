@@ -12,7 +12,17 @@ The API Compatibility Profile does not grant Cursor ambient filesystem or shell 
 
 ## Operator console
 
-`/console/` is a static UI served by the same process as the API. Its v0.1 account-management endpoint has no separate access key. A raw Cursor key is sent only once when an operator imports it; list, probe, and playground responses return an account id and masked hint, never the stored key. Account JSON files remain plaintext secrets protected by `0700`/`0600` filesystem permissions. The management API can add/remove pool credentials and run a probe, so the supplied compose files bind the console to `127.0.0.1` only. Prefer an encrypted state volume. An Internet-facing reverse proxy must authenticate and restrict `/console/` and `/v0/management/*`. If `CONSOLE_DIR` is overridden, keep it pointed at a dedicated, trusted build tree.
+`/console/` is a static UI served by the same process as the API. Its v0.1 account-management endpoint has no separate access key. A raw Cursor key is sent only once when an operator imports it; list, probe, and playground responses return an account id and masked hint, never the stored key. Account JSON files remain plaintext secrets protected by `0700`/`0600` filesystem permissions. The management API can add/remove pool credentials and run a probe, so `/console/` and `/v0/management/*` reject non-loopback sockets in-process and ignore `X-Forwarded-For` / `X-Real-IP`. Protocol APIs may bind on LAN (`HOST=0.0.0.0`). Prefer an encrypted state volume. An Internet-facing reverse proxy must authenticate and restrict `/console/` and `/v0/management/*`. If `CONSOLE_DIR` is overridden, keep it pointed at a dedicated, trusted build tree.
+
+Loopback is evaluated inside the gateway's network namespace. Docker bridge
+port publishing does not expose the operator console, including when the host
+port binds to loopback. Use a protected seed credential or a container-local
+management request; do not trust bridge addresses or forwarded headers as an
+authentication substitute. See [Deployment](DEPLOYMENT.md#docker).
+
+`npm start` loads a local `.env` file when present; exported environment values
+take precedence. Keep that file owner-only and outside source control. Container
+startup uses its explicitly supplied environment and does not load host files.
 
 ## Logging
 

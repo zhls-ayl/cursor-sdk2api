@@ -35,6 +35,7 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+      - run: node tests/deployment/node-smoke.mjs
       - name: Secret scan
         run: >-
           docker run --rm
@@ -42,9 +43,12 @@ jobs:
           -w /repo
           ghcr.io/gitleaks/gitleaks:v8.28.0
           dir . --config .gitleaks.toml --redact --no-banner
-      - name: Build and scan release candidate
+      - name: Build and smoke test release candidate
         run: |
           docker build -t cursor-sdk2api:release-scan .
+          bash tests/deployment/container-smoke.sh cursor-sdk2api:release-scan
+      - name: Scan release candidate
+        run: |
           docker run --rm \
             -v /var/run/docker.sock:/var/run/docker.sock \
             aquasec/trivy:0.66.0 image \

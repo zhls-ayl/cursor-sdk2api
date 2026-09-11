@@ -13,6 +13,11 @@ export interface HealthPayload {
   readiness: {
     accepting_sessions: boolean;
     shutting_down: boolean;
+    scope: "local";
+    upstream_verified: false;
+    default_profile_ready: boolean;
+    credential_pool_ready: boolean;
+    reasons: string[];
   };
   capabilities: Record<string, boolean | string>;
 }

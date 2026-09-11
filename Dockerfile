@@ -21,11 +21,12 @@ LABEL org.opencontainers.image.title="cursor-sdk2api" \
       org.opencontainers.image.licenses="MIT"
 COPY --from=build --chown=65532:65532 /app/node_modules ./node_modules
 COPY --from=build --chown=65532:65532 /app/dist ./dist
+COPY --from=build --chown=65532:65532 /app/package.json ./package.json
 COPY --from=build --chown=65532:65532 /app/data /data
 COPY --chown=65532:65532 LICENSE NOTICE.md README.md README.zh-CN.md ./
 ENV STATE_DIR=/data
 EXPOSE 8080
 VOLUME ["/data"]
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-  CMD ["/nodejs/bin/node", "-e", "fetch('http://127.0.0.1:'+(process.env.PORT||8080)+'/health').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+  CMD ["/nodejs/bin/node", "-e", "fetch('http://127.0.0.1:'+(process.env.PORT||8080)+'/livez').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
 CMD ["dist/index.js"]

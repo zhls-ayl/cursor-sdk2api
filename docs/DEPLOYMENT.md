@@ -4,10 +4,18 @@
 
 ```bash
 cp .env.example .env
+# Edit .env: replace the gateway key and set a persistent STATE_DIR.
+chmod 600 .env
 npm ci
 npm run build
-node dist/index.js
+npm start
 ```
+
+`npm start` loads `.env` when present using Node's `--env-file-if-exists`.
+Already-exported environment variables take precedence. For an explicit file,
+use `node --env-file=/protected/gateway.env dist/index.js`. A bare
+`node dist/index.js` reads only the process environment. No credentials are
+needed for the deterministic tests or build.
 
 The immutable build includes the optional BF Labs Operator Console at
 `/console/`. It is served by the same Node process from `dist/console`; no
@@ -16,22 +24,71 @@ intentionally supplies a different prebuilt static bundle.
 
 Loading the page and its v0.1 management calls is unauthenticated. A Cursor key
 is sent only during import and is not returned to the browser afterward; the
-roster keeps only account ids and masked hints. The supplied compose files bind
-the console to `127.0.0.1`. An Internet-facing reverse proxy must authenticate
-and restrict `/console/` and `/v0/management/*`.
+roster keeps only account ids and masked hints. `HOST=0.0.0.0` publishes `/v1`
+and `/health` on the LAN. `/console/` and `/v0/management/*` still require a
+loopback socket and ignore forwarded client IPs. An Internet-facing reverse
+proxy must authenticate and restrict `/console/` and `/v0/management/*`.
 
 ## Docker
 
 ```bash
 docker build -t cursor-sdk2api:local .
-docker run --rm -p 127.0.0.1:8080:8080 \
-  -e AUTH_MODE=managed \
-  -e GATEWAY_ACCESS_KEY='replace-me' \
+docker run -d --name cursor-sdk2api -p 127.0.0.1:8080:8080 \
+  --env-file .env -e HOST=0.0.0.0 -e PORT=8080 -e STATE_DIR=/data \
+  --restart unless-stopped --stop-timeout 3660 \
   -v cursor-sdk2api-data:/data \
   cursor-sdk2api:local
 ```
 
 `docker-compose.yml` is a single-service wrapper. It does not mount files from other projects and does not ship secrets.
+
+For managed Docker setup, set distinct `GATEWAY_ACCESS_KEY` and `CURSOR_API_KEY`
+values in the protected `.env` file before starting. The Cursor key seeds the
+persistent account pool; an empty pool deliberately reports not ready. Compose
+publishes the protocol API on `GATEWAY_BIND` (default `0.0.0.0`); set it to
+`127.0.0.1` for a host-only API.
+
+Docker bridge port publishing does not make a host browser's socket loopback
+inside the container. `/console/` and `/v0/management/*` remain inaccessible
+through that mapping, even when the host port binds to `127.0.0.1`. The browser
+console works with the local Node deployment above. For additional accounts in
+Compose, an operator can import a key through container-local loopback without
+putting it in command arguments or output:
+
+```bash
+docker compose exec -T gateway /nodejs/bin/node --input-type=module -e '
+  import { readFileSync } from "node:fs";
+  const api_key = readFileSync(0, "utf8").trim();
+  if (!api_key) throw new Error("Key file is empty");
+  const response = await fetch("http://127.0.0.1:8080/v0/management/accounts", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ api_key }), signal: AbortSignal.timeout(5000),
+  });
+  if (!response.ok) throw new Error(`Account import failed: HTTP ${response.status}`);
+  console.log("Account imported");
+' < /protected/cursor-key
+```
+
+## Health and supervision
+
+- `GET /livez`: HTTP 200 while the HTTP process is responsive, including during
+  drain and initial account setup. Docker uses this liveness check.
+- `GET /health`: HTTP 200 when locally ready for new sessions; HTTP 503 and
+  `status=not_ready` during drain, with an empty managed pool, or when the default
+  runtime is locally unavailable. The console can still load to import accounts.
+- Readiness is explicitly local (`upstream_verified=false`). It does not call
+  Cursor or prove credential validity, model access, quota, or upstream reachability.
+  Those require a separate authenticated business check.
+
+Compose restarts an exited process with `restart: unless-stopped`. Its default
+`GATEWAY_STOP_GRACE_PERIOD=61m` covers `RUN_DEADLINE_MS=3600000` plus the final
+10-second socket close window. If the run deadline changes, keep the stop grace
+period longer than that total. `docker stop --time` can override the allowance;
+an earlier forced stop may interrupt active work.
+
+After building, `node tests/deployment/node-smoke.mjs` checks the packaged Node
+service with temporary state and synthetic configuration. CI also starts the
+built image through the credential-free container smoke before release.
 
 ## GHCR releases
 
@@ -47,7 +104,10 @@ build stage and copied into the runtime image.
 
 ```bash
 docker pull ghcr.io/sunnyender-org/cursor-sdk2api@sha256:<digest>
-docker run --rm -p 127.0.0.1:8080:8080 \
+docker run -d -p 127.0.0.1:8080:8080 \
+  --env-file .env -e HOST=0.0.0.0 -e PORT=8080 -e STATE_DIR=/data \
+  --restart unless-stopped --stop-timeout 3660 \
+  -v cursor-sdk2api-data:/data \
   ghcr.io/sunnyender-org/cursor-sdk2api@sha256:<digest>
 ```
 

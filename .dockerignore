@@ -3,6 +3,7 @@ dist
 .git
 .github
 .grok-companion
+.cursor-sdk2api
 coverage
 .env*
 !.env.example
@@ -10,3 +11,4 @@ tests
 docs
 *.log
 tmp
+_temp

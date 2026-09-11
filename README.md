@@ -60,8 +60,16 @@ curl http://localhost:8080/v1/models \
 Docker:
 
 ```bash
+cp .env.example .env
+# Set distinct GATEWAY_ACCESS_KEY and CURSOR_API_KEY values for the managed pool.
+chmod 600 .env
 docker compose up --build
 ```
+
+Docker port publishing exposes the API; the operator console remains
+container-local. See [Deployment](docs/DEPLOYMENT.md#docker) for account import
+and persistent state setup. For local Node startup, `npm start` loads `.env`
+when present; exported environment variables take precedence.
 
 If Cursor needs a proxy, set `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY`. The gateway applies them to both SDK data planes. SOCKS and PAC URLs fail closed.
 
@@ -120,16 +128,17 @@ Client tools are converted to SDK `local.customTools` through MCP. The model cho
 - `/console/`: local operator console
 - `/v1/models`: live Cursor model catalog
 - `/v1/account`: pooled Cursor identities and current Dashboard usage in managed mode
-- `/health`: capabilities, SDK version, default/sdk/sand profile readiness, and proxy transport mode
+- `/livez`: process liveness, including initial setup and drain
+- `/health`: local readiness (HTTP 503 when not ready), capabilities, SDK version, and proxy transport mode; does not probe upstream credentials or models
 - `STATE_DIR`: account, SDK store, and resume state
 
 Managed mode follows CPA's split between client keys and upstream credentials: clients receive only `GATEWAY_ACCESS_KEY`; imported Cursor keys stay in the gateway account store. New sessions use model-aware round-robin. Continuations stay pinned when the original account is healthy; before semantic output, one alternate managed account may be tried. If the original account/session is gone, an exact full transcript can cold-branch safely. BYOK remains available for a trusted single-user sidecar.
 
-`v0.1` is a trusted single-process sidecar. The management account endpoint has no separate authentication. Imported Cursor keys are stored in owner-only state files and are never returned to the browser after import. The supplied compose files bind the console to loopback; authenticate and restrict `/console/` plus `/v0/management/*` at any Internet-facing proxy.
+The gateway is a trusted single-process sidecar. The management account endpoint has no separate authentication. Imported Cursor keys are stored in owner-only state files and are never returned to the browser after import. The console and management API require loopback sockets inside the gateway's network namespace; authenticate and restrict `/console/` plus `/v0/management/*` at any Internet-facing proxy.
 
 ## Verification
 
-The deterministic suite contains 189 tests. The latest redacted receipt proves persisted and full-transcript recovery on Sonnet 4.6 and Grok 4.6 xhigh: [recovery live smoke](docs/evidence/2026-08-19-beefapi-sync-live-smoke.md). The earlier four-model receipt also covers Fable 5 and Composer 2.5: [four-model evidence](docs/evidence/2026-08-15-live-smoke.md).
+The deterministic suite covers protocol contracts, session recovery, and service boundaries. The latest redacted receipt proves persisted and full-transcript recovery on Sonnet 4.6 and Grok 4.6 xhigh: [recovery live smoke](docs/evidence/2026-08-19-beefapi-sync-live-smoke.md). The earlier four-model receipt also covers Fable 5 and Composer 2.5: [four-model evidence](docs/evidence/2026-08-15-live-smoke.md).
 
 ```bash
 npm run typecheck

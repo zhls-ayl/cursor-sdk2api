@@ -17,4 +17,7 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+      - run: node tests/deployment/node-smoke.mjs
       - run: docker build -t cursor-sdk2api:ci .
+      - name: Smoke test production image without upstream credentials
+        run: bash tests/deployment/container-smoke.sh cursor-sdk2api:ci

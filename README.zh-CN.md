@@ -61,8 +61,13 @@ curl http://localhost:8080/v1/models \
 Docker：
 
 ```bash
+cp .env.example .env
+# 为 managed 账号池设置不同的 GATEWAY_ACCESS_KEY 与 CURSOR_API_KEY。
+chmod 600 .env
 docker compose up --build
 ```
+
+Docker 端口映射提供协议 API，管理入口保持容器内 loopback 限制。账号导入与持久化配置见[部署文档](docs/DEPLOYMENT.md#docker)。本地 Node 使用 `npm start` 时会加载存在的 `.env`，已导出的环境变量优先。
 
 Cursor 需要代理时，设置 `HTTP_PROXY`、`HTTPS_PROXY` 和 `NO_PROXY`。网关会把两条 SDK 数据通路一起接管。SOCKS 和 PAC 会 fail closed。
 
@@ -117,16 +122,17 @@ env_key = "GATEWAY_ACCESS_KEY"
 - `/console/`：本地运维控制台
 - `/v1/models`：Cursor 实时模型目录
 - `/v1/account`：managed 模式下所有 Cursor 账号身份与当前 Dashboard 用量
-- `/health`：能力、SDK 版本、默认/sdk/sand 就绪状态和代理传输状态
+- `/livez`：进程存活检查，初始化和 drain 期间仍可响应
+- `/health`：本地 readiness、能力、SDK 版本和代理状态；未就绪返回 HTTP 503，不探测上游凭据或模型
 - `STATE_DIR`：账号、SDK store 和 resume 状态
 
 Managed 模式沿用 CPA 的客户端 Key 与上游凭据分离方式：客户端只拿到 `GATEWAY_ACCESS_KEY`，导入的 Cursor Key 留在网关账号池。新会话按模型 round-robin；正常续轮固定原账号，尚未产生语义输出时允许一次备用账号重试。原账号或 SDK 会话丢失时，只要 transcript 完整且自洽，网关可安全冷恢复。BYOK 仅作为可信单用户 sidecar 的兼容模式保留。
 
-`v0.1` 是可信单进程 sidecar。账号管理接口没有单独认证；导入的 Cursor Key 会保存在仅 Owner 可读的状态文件中，导入后不会再返回给浏览器。随附 compose 已把控制台绑定到本机回环；任何公网反代都必须认证并限制 `/console/` 与 `/v0/management/*`。
+网关是可信单进程 sidecar。账号管理接口没有单独认证；导入的 Cursor Key 会保存在仅 Owner 可读的状态文件中，导入后不会再返回给浏览器。控制台与管理 API 只接受网关所在网络命名空间内的 loopback socket；任何公网反代都必须认证并限制 `/console/` 与 `/v0/management/*`。
 
 ## 验证
 
-确定性测试共 189 项。最新脱敏回执证明 Sonnet 4.6 与 Grok 4.6 xhigh 的持久化恢复和完整 transcript 冷恢复：[恢复 live smoke](docs/evidence/2026-08-19-beefapi-sync-live-smoke.md)。较早的四模型回执还覆盖 Fable 5 与 Composer 2.5：[四模型回执](docs/evidence/2026-08-15-live-smoke.md)。
+确定性测试覆盖协议、会话恢复与服务边界。最新脱敏回执证明 Sonnet 4.6 与 Grok 4.6 xhigh 的持久化恢复和完整 transcript 冷恢复：[恢复 live smoke](docs/evidence/2026-08-19-beefapi-sync-live-smoke.md)。较早的四模型回执还覆盖 Fable 5 与 Composer 2.5：[四模型回执](docs/evidence/2026-08-15-live-smoke.md)。
 
 ```bash
 npm run typecheck

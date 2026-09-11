@@ -57,6 +57,7 @@ import type { SdkRuntime } from "../sdk/port.js";
 import { ModelCatalog } from "../sdk/catalog.js";
 import { headerValue, readJsonBody, requestPath, sendError, sendJson, sendOpenAIError } from "./http-util.js";
 import { serveConsole } from "./console.js";
+import { requireLoopbackOperator } from "./loopback.js";
 
 export interface App {
   config: GatewayConfig;
@@ -368,9 +369,11 @@ export function createApp(input: {
 
   const handler = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     const requestId = headerValue(req, "x-request-id") || newRequestId();
-    const path = requestPath(req);
+    let path = "<invalid_request_target>";
     const method = (req.method ?? "GET").toUpperCase();
     try {
+      path = requestPath(req);
+      requireLoopbackOperator(req, path);
       if (
         (method === "GET" || method === "HEAD") &&
         serveConsole(res, path, requestId, config.consoleDir, method === "HEAD")
@@ -378,12 +381,33 @@ export function createApp(input: {
         return;
       }
 
+      if (method === "GET" && path === "/livez") {
+        sendJson(res, 200, { status: "ok", service: "cursor-sdk2api" }, requestId);
+        return;
+      }
+
       if (method === "GET" && path === "/health") {
+        const draining = shuttingDown || registry.shuttingDown;
+        const sdkReady = Boolean(sdk.sdkVersion?.trim()) && sdk.sdkVersion !== "unavailable";
+        const defaultProfileReady = config.runtimePolicy.defaultProfile === "sand" ? sandHealth.ready : sdkReady;
+        const reasons: string[] = [];
+        if (draining) reasons.push("gateway_draining");
+        if (!defaultProfileReady) reasons.push(`${config.runtimePolicy.defaultProfile}_runtime_unavailable`);
+        let credentialPoolReady = config.authMode !== "managed";
+        if (config.authMode === "managed") {
+          try {
+            credentialPoolReady = accounts.list().length > 0;
+            if (!credentialPoolReady) reasons.push("cursor_account_pool_empty");
+          } catch {
+            reasons.push("cursor_account_store_unavailable");
+          }
+        }
+        const locallyReady = reasons.length === 0;
         sendJson(
           res,
-          200,
+          locallyReady ? 200 : 503,
           {
-            status: shuttingDown ? "not_ready" : "ok",
+            status: locallyReady ? "ok" : "not_ready",
             service: "cursor-sdk2api",
             version: config.version,
             sdk_version:
@@ -398,7 +422,7 @@ export function createApp(input: {
             profiles: {
               default: config.runtimePolicy.defaultProfile,
               sdk: {
-                ready: true,
+                ready: sdkReady,
                 sdk_version:
                   sdk.sdkVersion && sdk.sdkVersion !== "unavailable" ? sdk.sdkVersion : config.sdkVersion,
               },
@@ -410,8 +434,13 @@ export function createApp(input: {
               },
             },
             readiness: {
-              accepting_sessions: !shuttingDown && !registry.shuttingDown,
-              shutting_down: shuttingDown,
+              accepting_sessions: locallyReady,
+              shutting_down: draining,
+              scope: "local",
+              upstream_verified: false,
+              default_profile_ready: defaultProfileReady,
+              credential_pool_ready: credentialPoolReady,
+              reasons,
             },
             capabilities: {
               ...config.capabilities,
@@ -780,7 +809,18 @@ export function createApp(input: {
     handler,
     listen() {
       const server = createServer((req, res) => {
-        void handler(req, res);
+        void handler(req, res).catch(() => {
+          // Last-resort containment if even the normal error response fails.
+          // Raw request targets and thrown payloads must not reach this log.
+          try {
+            logger.error({ error_type: "request_handler_failure" }, "request handler failed");
+            if (res.writableEnded || res.destroyed) return;
+            if (res.headersSent) res.destroy();
+            else sendError(res, upstreamError("Internal server error", 500), newRequestId());
+          } catch {
+            res.destroy();
+          }
+        });
       });
       server.listen(config.port, config.host);
       return server;

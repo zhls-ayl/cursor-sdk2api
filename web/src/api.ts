@@ -8,7 +8,16 @@ export interface ManagementAccount {
 }
 
 export async function getHealth(): Promise<HealthPayload> {
-  return getJson<HealthPayload>("/health");
+  const response = await fetch("/health");
+  if (response.ok) return (await response.json()) as HealthPayload;
+  if (response.status === 503) {
+    const body = await response.clone().json().catch(() => null) as HealthPayload | null;
+    if (body?.service === "cursor-sdk2api" && body.status === "not_ready"
+      && body.readiness?.accepting_sessions === false && body.network && body.capabilities) {
+      return body;
+    }
+  }
+  throw new Error(await errorMessage(response));
 }
 
 export async function getModels(apiKey: string): Promise<ModelsPayload> {

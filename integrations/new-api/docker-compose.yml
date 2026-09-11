@@ -8,6 +8,7 @@ services:
         REVISION: local
     pull_policy: missing
     restart: unless-stopped
+    stop_grace_period: ${GATEWAY_STOP_GRACE_PERIOD:-61m}
     ports:
       - "127.0.0.1:${GATEWAY_PORT:-8080}:8080"
     environment:
@@ -17,10 +18,11 @@ services:
       HOST: 0.0.0.0
       PORT: 8080
       STATE_DIR: /data
+      RUN_DEADLINE_MS: ${RUN_DEADLINE_MS:-3600000}
     volumes:
       - gateway-data:/data
     healthcheck:
-      test: ["CMD", "/nodejs/bin/node", "-e", "fetch('http://127.0.0.1:8080/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      test: ["CMD", "/nodejs/bin/node", "-e", "fetch('http://127.0.0.1:8080/livez').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 5s
       timeout: 3s
       retries: 20
@@ -53,7 +55,7 @@ services:
       - sh
       - -ec
       - |
-        curl --fail --silent --show-error http://gateway:8080/health >/dev/null
+        curl --fail --silent --show-error http://gateway:8080/livez >/dev/null
         until curl --fail --silent --show-error http://new-api:3000/api/status >/dev/null; do sleep 2; done
 
 volumes:
