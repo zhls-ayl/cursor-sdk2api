@@ -660,8 +660,8 @@ export function App() {
           {copied ? <span className="copy-toast" role="status">{t.home.copied}</span> : null}
         </p>
         <nav className="links">
-          <a href="https://github.com/Sunnyender-org/cursor-sdk2api" target="_blank" rel="noreferrer">{t.source}</a>
-          <a href="https://github.com/Sunnyender-org/cursor-sdk2api/blob/main/docs/SECURITY.md" target="_blank" rel="noreferrer">{t.security}</a>
+          <a href="https://github.com/zhls-ayl/cursor-sdk2api" target="_blank" rel="noreferrer">{t.source}</a>
+          <a href="https://github.com/zhls-ayl/cursor-sdk2api/blob/main/docs/SECURITY.md" target="_blank" rel="noreferrer">{t.security}</a>
         </nav>
       </header>
       <main id="main-content">

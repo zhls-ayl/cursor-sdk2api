@@ -143,23 +143,27 @@ publishes `linux/amd64` and `linux/arm64` images with OCI provenance and SBOM
 attestations. The generated GitHub Release includes `image-digest.txt` so an
 operator can deploy an immutable reference:
 
+The `zhls-ayl` image examples below become usable only after an independently
+maintained version has been published and its digest recorded in the Release.
+Until then, use the local Compose build described above.
+
 The runtime stage is a pinned non-root distroless Node 22 / Debian 13 image. It contains no
 shell, package manager, or npm CLI; production dependencies are pruned in the
 build stage and copied into the runtime image.
 
 ```bash
-docker pull ghcr.io/sunnyender-org/cursor-sdk2api@sha256:<digest>
+docker pull ghcr.io/zhls-ayl/cursor-sdk2api@sha256:<digest>
 docker run -d -p 127.0.0.1:8080:8080 \
   --env-file .env -e HOST=0.0.0.0 -e PORT=8080 -e STATE_DIR=/data \
   --restart unless-stopped --stop-timeout 3660 \
   -v cursor-sdk2api-data:/data \
-  ghcr.io/sunnyender-org/cursor-sdk2api@sha256:<digest>
+  ghcr.io/zhls-ayl/cursor-sdk2api@sha256:<digest>
 ```
 
 Source changes and a green workflow do not mean an image exists. Creating the
 tag and GitHub Release remains a separate maintainer action.
 
-The existing `v0.1.0` source Release predates this GHCR workflow and has no
+The original repository's `v0.1.0` source Release predates this GHCR workflow and has no
 container asset. Before a later approved release, bump `package.json`, create
 the matching new tag, verify the GHCR package is public, and prove an
 unauthenticated pull by digest.

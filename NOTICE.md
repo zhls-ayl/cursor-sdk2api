@@ -1,6 +1,8 @@
 # NOTICE
 
-cursor-sdk2api is an independent, MIT-licensed project maintained by Sunnyender-org and contributors.
+This MIT-licensed repository is independently maintained by zhls-ayl and contributors.
+
+It is based on [Sunnyender-org/cursor-sdk2api](https://github.com/Sunnyender-org/cursor-sdk2api). The original copyright notices and MIT license are preserved in `LICENSE`.
 
 This project is not affiliated with, endorsed by, or sponsored by Anysphere, Inc. or Cursor.
 

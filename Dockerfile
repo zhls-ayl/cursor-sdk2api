@@ -9,7 +9,7 @@ RUN npm ci && npm run build && npm prune --omit=dev && mkdir /app/data
 FROM gcr.io/distroless/nodejs22-debian13:nonroot@sha256:939d6f1671529d230f50b563578e9b5d206af58f038b10ebd7e1233023d4e167
 ARG VERSION=dev
 ARG REVISION=unknown
-ARG SOURCE_URL=https://github.com/Sunnyender-org/cursor-sdk2api
+ARG SOURCE_URL=https://github.com/zhls-ayl/cursor-sdk2api
 WORKDIR /app
 ENV NODE_ENV=production
 ENV GATEWAY_VERSION=${VERSION}

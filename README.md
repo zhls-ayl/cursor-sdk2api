@@ -10,11 +10,13 @@
 
 <p align="center">
   <a href="README.zh-CN.md">简体中文</a> ·
-  <a href="https://github.com/Sunnyender-org/cursor-sdk2api/actions/workflows/ci.yml">CI</a> ·
+  <a href="https://github.com/zhls-ayl/cursor-sdk2api/actions/workflows/ci.yml">CI</a> ·
   <a href="LICENSE">MIT</a>
 </p>
 
 `cursor-sdk2api` turns the published [`@cursor/sdk`](https://www.npmjs.com/package/@cursor/sdk) into Anthropic Messages, OpenAI Chat Completions, and OpenAI Responses APIs. It uses the official Cursor Agent harness, not browser cookies, private transports, or CLI session scraping.
+
+This repository is independently maintained by [zhls-ayl](https://github.com/zhls-ayl/cursor-sdk2api), with development on `main`.
 
 <p align="center">
   <img src="docs/assets/console-accounts.jpg" alt="cursor-sdk2api multi-account operator console">
@@ -43,7 +45,7 @@
 Requires Node.js 22.19 or newer, one gateway key, and at least one Cursor User API Key to import.
 
 ```bash
-git clone https://github.com/Sunnyender-org/cursor-sdk2api.git
+git clone https://github.com/zhls-ayl/cursor-sdk2api.git
 cd cursor-sdk2api
 npm ci
 npm run build

@@ -39,10 +39,13 @@ explicit model ratios/prices for `claude-sonnet-4-6`, `grok-4.6`, and
 `composer-2.5` before testing. Do not use a fallback ratio as a customer billing
 contract.
 
-For an immutable deployment, set `CURSOR_SDK2API_IMAGE` to a released digest:
+For an immutable deployment, set `CURSOR_SDK2API_IMAGE` to a released digest.
+The example below becomes usable only after an independently maintained
+`zhls-ayl` image has been published and its digest recorded in the Release.
+Until then, use the local Compose build above.
 
 ```dotenv
-CURSOR_SDK2API_IMAGE=ghcr.io/sunnyender-org/cursor-sdk2api@sha256:<release-digest>
+CURSOR_SDK2API_IMAGE=ghcr.io/zhls-ayl/cursor-sdk2api@sha256:<release-digest>
 ```
 
 The release workflow records the exact digest in `image-digest.txt`. A mutable
