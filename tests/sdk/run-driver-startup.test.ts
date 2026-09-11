@@ -79,7 +79,7 @@ test("a pre-aborted request never creates an SDK Agent", async () => {
   expect(sdk.createCalls).toHaveLength(0);
 });
 
-test.each(["timeout", "disconnect"] as const)("pending send %s closes the Agent and cancels the late Run", async (reason) => {
+test.each(["timeout", "disconnect"] as const)("pending send %s waits before disposing the Agent and cancels the late Run", async (reason) => {
   const { clock, sdk, session, driver, input } = setup();
   const held = gate();
   const atSend = gate();
@@ -103,7 +103,8 @@ test.each(["timeout", "disconnect"] as const)("pending send %s closes the Agent 
   if (reason === "timeout") clock.advance(100);
   else abort.abort();
   await rejected;
-  expect(sdk.agents[0]?.closed).toBe(true);
+  expect(sdk.agents[0]?.closed).toBe(false);
+  expect(session.agent).toBeUndefined();
   expect(sdk.agents[0]?.runs[0]?.cancelled).toBe(false);
   held.resolve();
   await held.promise;
@@ -112,6 +113,47 @@ test.each(["timeout", "disconnect"] as const)("pending send %s closes the Agent 
   expect(sdk.agents[0]?.runs[0]?.streamStarts).toBe(0);
   expect(session.run).toBeUndefined();
   expect(session.pump).toBeUndefined();
+});
+
+test.each([false, true])("late Run terminal confirmation precedes Agent disposal (cancel rejects: %s)", async (cancelRejects) => {
+  const { clock, sdk, driver, input } = setup();
+  const returned = gate();
+  const terminal = gate();
+  const entered = gate();
+  const waiting = gate();
+  const create = sdk.createAgent.bind(sdk);
+  sdk.createAgent = async (args) => {
+    const agent = await create(args);
+    const send = agent.send.bind(agent);
+    agent.send = async (args) => {
+      const run = await send(args);
+      const wait = run.wait.bind(run);
+      const cancel = run.cancel.bind(run);
+      run.cancel = async () => { await cancel(); if (cancelRejects) throw new Error("cancellation acknowledgement failed"); };
+      run.wait = async () => { waiting.resolve(); await terminal.promise; return wait(); };
+      entered.resolve();
+      await returned.promise;
+      return run;
+    };
+    return agent;
+  };
+  const started = driver.start(input).catch((error: unknown) => error);
+  await entered.promise;
+  clock.advance(100);
+  const error = await started as SdkStartupInterruptedError;
+  let settled = false;
+  void error.pendingSettlement.then(() => { settled = true; });
+  expect(sdk.agents[0]?.closed).toBe(false);
+  returned.resolve();
+  await waiting.promise;
+  expect(sdk.agents[0]?.runs[0]?.cancelled).toBe(true);
+  expect(sdk.agents[0]?.closed).toBe(false);
+  expect(settled).toBe(false);
+  terminal.resolve();
+  if (cancelRejects) await new Promise<void>((done) => setImmediate(done));
+  else await error.pendingSettlement;
+  expect(sdk.agents[0]?.closed).toBe(true);
+  expect(settled).toBe(!cancelRejects);
 });
 
 test("SDK startup and first-event observation share the same deadline budget", async () => {
@@ -234,4 +276,46 @@ test("failed late cleanup keeps the interrupted startup retry gate closed", asyn
   await new Promise<void>((done) => setImmediate(done));
   expect(settled).toBe(false);
   expect(sdk.agents[0]?.sendCount).toBe(0);
+});
+
+test("a failed Send with blocked disposal still respects the startup deadline", async () => {
+  const { clock, sdk, driver, input } = setup();
+  const closing = gate();
+  const entered = gate();
+  const create = sdk.createAgent.bind(sdk);
+  sdk.createAgent = async (args) => {
+    const agent = await create(args);
+    agent.send = async () => { throw new Error("upstream failed"); };
+    agent.close = async () => { entered.resolve(); await closing.promise; };
+    return agent;
+  };
+  const started = driver.start(input).catch((error: unknown) => error);
+  await entered.promise;
+  clock.advance(100);
+  const error = await started as SdkStartupInterruptedError;
+  expect(error).toBeInstanceOf(SdkStartupInterruptedError);
+  let settled = false;
+  void error.pendingSettlement.then(() => { settled = true; });
+  await Promise.resolve();
+  expect(settled).toBe(false);
+  closing.resolve();
+  await error.pendingSettlement;
+});
+
+test("failed disposal after a Send error retains the protected startup gate", async () => {
+  const { sdk, driver, input } = setup();
+  const create = sdk.createAgent.bind(sdk);
+  sdk.createAgent = async (args) => {
+    const agent = await create(args);
+    agent.send = async () => { throw new Error("upstream failed"); };
+    agent.close = async () => { throw new Error("disposal failed"); };
+    return agent;
+  };
+  const error = await driver.start(input).catch((error: unknown) => error) as SdkStartupInterruptedError;
+  expect(error).toBeInstanceOf(SdkStartupInterruptedError);
+  expect(error).toMatchObject({ code: "cursor_upstream_error", httpStatus: 502 });
+  let settled = false;
+  void error.pendingSettlement.then(() => { settled = true; });
+  await new Promise<void>((done) => setImmediate(done));
+  expect(settled).toBe(false);
 });

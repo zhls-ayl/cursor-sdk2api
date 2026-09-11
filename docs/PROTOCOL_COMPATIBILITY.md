@@ -29,7 +29,7 @@ Outer agents (Claude Code, Grok Build) execute their own local file tools in the
 | pending tool restart | yes | Exact credential/model/tool batch resumes with persisted SDK Agent lineage and `local.force=true` |
 | expired/moved tool continuation | yes | A complete transcript whose latest assistant tool batch exactly matches the submitted results can cold-branch to a new SDK Agent; recorded identical tools replay internally |
 | duplicate-same after restart | no | Digest only; no persisted assistant replay |
-| `/v1/models` | yes | BYOK returns one account catalog. Managed mode returns the union of exact catalog ids across the pool. |
+| `/v1/models` | yes | BYOK returns one account catalog. Managed mode returns the union of exact catalog ids across the pool. An unavailable catalog is HTTP 503; a usable stale catalog remains HTTP 200. |
 | `/v1/account` | yes | BYOK returns one account. Managed mode returns every pooled identity and real Cursor Dashboard period usage without exposing raw keys. |
 | `/v1/messages/count_tokens` | estimated | Conservative local context-sizing estimate for Claude Code; response header marks it estimated and final SDK usage remains authoritative |
 | `/v1/chat/completions` | yes | Protocol adapter over the same Messages run engine. Contract-tested: non-stream text, OpenAI SSE `data:` chunks + `[DONE]`, `reasoning_content`, function tools, single/parallel continuation, duplicate-same replay, deferred/final cache-aware usage, `stream_options.include_usage`, `reasoning_effort` / `cursor_model_params`, base64 `image_url`, `n=1` only, unknown tool IDs fail closed, and OpenAI error shapes before and after stream start. Remote `image_url` URLs are `422`. Live Chat model matrix is not claimed. |
@@ -41,6 +41,14 @@ Outer agents (Claude Code, Grok Build) execute their own local file tools in the
 | `cursor_model_params` | extension | Exact validated `{id,value}` pairs passed to the official SDK model selection. Explicit parameters are bound to the session and persisted for completed `Agent.resume`; an explicit change on the same session is `409 cursor_session_conflict`. |
 
 Completed follow-up and persisted `Agent.resume` consume the same global / per-credential active-run limits as `create`. Awaiting `tool_result` continuation does not.
+
+`GET /v1/models` returns HTTP 503 with an OpenAI error object (`type: api_error`,
+`code: cursor_upstream_error`) when no fresh or permitted stale catalog is available.
+The diagnostic `status`, `reason`, `cache`, and list fields remain present; a refresh
+timeout is `reason: cursor_models_list_timeout`, not a successful empty catalog or
+proof of an invalid credential. A successful SDK response with no models remains
+HTTP 200. Managed mode also remains HTTP 200 when another account supplies a usable
+catalog, and reports 503 when the pool is empty or every catalog is unavailable.
 
 Managed mode follows CPA's separation of proxy client keys from upstream
 credentials. A valid `GATEWAY_ACCESS_KEY` selects compatible accounts with

@@ -34,6 +34,7 @@ import {
   rateLimited,
   redactSecrets,
   sessionLost,
+  toOpenAIErrorBody,
   toPublicErrorBody,
   upstreamError,
 } from "../errors.js";
@@ -669,8 +670,11 @@ export function createApp(input: {
           : await listManagedModels(accounts.list(), catalog);
         sendJson(
           res,
-          listed.status === "unavailable" ? 200 : 200,
+          listed.status === "unavailable" ? 503 : 200,
           {
+            ...(listed.status === "unavailable"
+              ? toOpenAIErrorBody(upstreamError("Cursor model catalog is temporarily unavailable", 503), requestId)
+              : {}),
             object: "list",
             data: listed.models.map((model) => ({
               id: model.id,

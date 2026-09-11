@@ -37,6 +37,8 @@ export interface ReplayRecord {
 }
 
 export class Session {
+  private readonly closure = new AbortController();
+  readonly closedSignal: AbortSignal = this.closure.signal;
   readonly sessionId: string;
   readonly credentialFingerprint: string;
   readonly modelId: string;
@@ -133,5 +135,6 @@ export class Session {
   markClosed(reason: string): void {
     this.state = "closed";
     this.closeReason = reason;
+    this.closure.abort();
   }
 }

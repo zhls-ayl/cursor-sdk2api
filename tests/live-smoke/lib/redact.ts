@@ -1,6 +1,4 @@
-const SECRET_LIKE =
-  /(sk-[A-Za-z0-9_-]{8,})|(Bearer\s+\S+)|(api[_-]?key["'\s:=]+)[^\s"',}]+/gi;
-const URL_CREDENTIALS = /([a-z][a-z0-9+.-]*:\/\/)[^\s/@:]+:[^\s/@]+@/gi;
+import { redactSecrets as redactGatewaySecrets } from "../../../src/errors.js";
 
 const BLOCKED_KEYS = new Set([
   "authorization",
@@ -30,7 +28,7 @@ const BLOCKED_KEYS = new Set([
 ]);
 
 export function redactSecrets(text: string, canaries: string[] = []): string {
-  let out = text.replace(URL_CREDENTIALS, "$1[redacted]@").replace(SECRET_LIKE, "[redacted]");
+  let out = redactGatewaySecrets(text);
   const home = typeof process !== "undefined" ? process.env.HOME : undefined;
   if (home && home.length > 1) out = out.split(home).join("[home]");
   const user = typeof process !== "undefined" ? process.env.USER || process.env.LOGNAME : undefined;

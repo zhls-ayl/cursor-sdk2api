@@ -81,7 +81,7 @@ test.each([false, true])("disconnect during pending Send cancels the late Run (l
     abort.abort();
     await pending;
     await waitFor(() => ctx!.app.registry.activeCount() === 0);
-    expect(ctx.sdk.agents[0]?.closed).toBe(true);
+    expect(ctx.sdk.agents[0]?.closed).toBe(false);
     if (logicalKey) expect(ctx.app.ledger?.getRunByLogicalKey(logicalKey)).toBeUndefined();
   } finally {
     held.resolve();
@@ -110,6 +110,44 @@ test("HTTP startup timeout returns 504 before a blocked create resolves", async 
   }
   await waitFor(() => ctx!.sdk.agents[0]?.closed === true);
   expect(ctx.sdk.agents[0]?.sendCount).toBe(0);
+});
+
+test("registry shutdown during pending Send preserves SDK cleanup ordering and reserved capacity", async () => {
+  ctx = await startTestApp({ config: { globalActiveRuns: 1, firstEventTimeoutMs: 5_000 } });
+  const held = gate();
+  const terminal = gate();
+  const entered = gate();
+  const waiting = gate();
+  const create = ctx.sdk.createAgent.bind(ctx.sdk);
+  ctx.sdk.createAgent = async (args) => {
+    const agent = await create(args);
+    const send = agent.send.bind(agent);
+    agent.send = async (args) => {
+      const run = await send(args);
+      const wait = run.wait.bind(run);
+      run.wait = async () => { waiting.resolve(); await terminal.promise; return wait(); };
+      entered.resolve();
+      await held.promise;
+      return run;
+    };
+    return agent;
+  };
+  const request = api(ctx, "/v1/messages", { method: "POST", body: body() });
+  try {
+    await entered.promise;
+    const session = [...ctx.app.registry.sessions.values()][0]!;
+    ctx.app.registry.forget(session, "drain_deadline");
+    expect(ctx.sdk.agents[0]?.closed).toBe(false);
+    expect((await request).status).toBe(499);
+    expect((await api(ctx, "/v1/messages", { method: "POST", body: body("different") })).status).toBe(429);
+    held.resolve();
+    await waiting.promise;
+    expect(ctx.sdk.agents[0]?.closed).toBe(false);
+  } finally {
+    held.resolve();
+    terminal.resolve();
+  }
+  await waitFor(() => ctx!.sdk.agents[0]?.closed === true);
 });
 
 test("completed keep-alive requests remove their disconnect listeners", async () => {

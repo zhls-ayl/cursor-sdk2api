@@ -35,14 +35,16 @@ export interface DriveSdkRunInput {
 /** A pending SDK create/send cannot be retried safely until its late result is cleaned up. */
 export class SdkStartupInterruptedError extends GatewayError {
   constructor(
-    reason: "timeout" | "client_closed",
+    reason: "timeout" | "client_closed" | "cleanup_failed",
     /** Resolves only after pending SDK work and successful late resource cleanup settle. */
     readonly pendingSettlement: Promise<void> = Promise.resolve(),
   ) {
     super(
-      reason === "timeout" ? "cursor_timeout" : "client_closed",
-      reason === "timeout" ? "Timed out starting the SDK run" : "Client disconnected before the SDK run started",
-      reason === "timeout" ? 504 : 499,
+      reason === "timeout" ? "cursor_timeout" : reason === "cleanup_failed" ? "cursor_upstream_error" : "client_closed",
+      reason === "timeout" ? "Timed out starting the SDK run" : reason === "cleanup_failed"
+        ? "SDK startup cleanup failed; retry remains blocked"
+        : "Client disconnected before the SDK run started",
+      reason === "timeout" ? 504 : reason === "cleanup_failed" ? 502 : 499,
     );
   }
 }
@@ -95,9 +97,13 @@ export class SdkRunDriver {
     const timerController = new AbortController();
     const deltas = createDeltaBridge();
     let interruption: SdkStartupInterruptedError | undefined;
-    let readyAgent: SdkAgent | undefined;
+    let readyAgent: SdkAgent | undefined = input.agent.type === "existing" ? input.agent.agent : undefined;
+    // The driver owns startup resources, including while registry sweep/drain
+    // closes the Session. Return ownership only after Send has resolved.
+    if (readyAgent && session.agent === readyAgent) session.agent = undefined;
     let closedAgent: SdkAgent | undefined;
     let cancelledRun: SdkRun | undefined;
+    let sending = false;
     let resolveSettlement!: () => void;
     const pendingSettlement = new Promise<void>((resolve) => { resolveSettlement = resolve; });
     let finishAttempt!: () => void;
@@ -117,25 +123,43 @@ export class SdkRunDriver {
       if (session.agent === agent) session.agent = undefined;
       cleanup(() => agent.close());
     };
-    const cancelRun = (run: SdkRun) => {
+    const cancelRun = (run: SdkRun, agent: SdkAgent) => {
       if (cancelledRun === run) return;
       cancelledRun = run;
       if (session.run === run) session.run = undefined;
-      cleanup(() => run.cancel());
+      cleanup(async () => {
+        try {
+          await run.cancel();
+        } finally {
+          // Cancellation is a request. Keep admission reserved until the SDK
+          // confirms that the late Run has actually reached a terminal state.
+          // Even a failed cancel must not dispose a still-running executor.
+          try {
+            await run.wait();
+          } finally {
+            closeAgent(agent);
+          }
+        }
+      });
     };
     let rejectInterrupted!: (error: SdkStartupInterruptedError) => void;
     const interrupted = new Promise<never>((_, reject) => { rejectInterrupted = reject; });
-    const interrupt = (reason: "timeout" | "client_closed") => {
+    const interrupt = (reason: "timeout" | "client_closed" | "cleanup_failed") => {
       if (interruption) return;
       interruption = new SdkStartupInterruptedError(reason, pendingSettlement);
       deltas.discard();
-      if (session.run) cancelRun(session.run);
-      if (readyAgent) closeAgent(readyAgent);
+      // SDK send may still be acquiring its executor lease. Disposing the
+      // Agent here would race that acquisition; the late result owns cleanup.
+      if (readyAgent && session.agent === readyAgent) session.agent = undefined;
+      if (session.run && readyAgent) cancelRun(session.run, readyAgent);
+      else if (readyAgent && !sending && !cancelledRun) closeAgent(readyAgent);
       rejectInterrupted(interruption);
     };
     const onAbort = () => interrupt("client_closed");
     input.signal?.addEventListener("abort", onAbort, { once: true });
+    session.closedSignal.addEventListener("abort", onAbort, { once: true });
     if (input.signal?.aborted) onAbort();
+    if (session.closedSignal.aborted) onAbort();
     const timer = this.deps.clock.sleep(this.deps.firstEventTimeoutMs, timerController.signal)
       .then(() => interrupt("timeout"), () => undefined);
     const assertActive = () => {
@@ -164,22 +188,30 @@ export class SdkRunDriver {
       readyAgent = agent;
       if (interruption || session.state === "closed") closeAgent(agent);
       assertActive();
-      session.agent = agent;
       session.sdkAgentId = agent.agentId;
       input.afterAgentReady?.(agent);
       assertActive();
-      const run = await agent.send({
-        text: input.send.text,
-        images: input.send.images,
-        customTools,
-        force: input.send.force,
-        onDelta: deltas.ingest,
-      });
+      sending = true;
+      let run: SdkRun;
+      try {
+        run = await agent.send({
+          text: input.send.text,
+          images: input.send.images,
+          customTools,
+          force: input.send.force,
+          onDelta: deltas.ingest,
+        });
+      } catch (error) {
+        if (interruption || session.state === "closed") closeAgent(agent);
+        throw error;
+      } finally {
+        sending = false;
+      }
       if (interruption || session.state === "closed") {
-        cancelRun(run);
-        closeAgent(agent);
+        cancelRun(run, agent);
       }
       assertActive();
+      session.agent = agent;
       session.run = run;
       const pump = new EventPump(
         session,
@@ -194,7 +226,8 @@ export class SdkRunDriver {
       return pump;
     })();
     void Promise.allSettled([starting, attemptFinished]).then(async () => {
-      await Promise.all(cleanupTasks);
+      // Run cancellation can enqueue Agent disposal after the initial tasks.
+      for (let index = 0; index < cleanupTasks.length; index += 1) await cleanupTasks[index];
       // If cleanup fails, leave the request's retry gate closed. A replacement
       // Send would otherwise overlap SDK work whose cancellation is unproven.
       if (cleanupSucceeded) resolveSettlement();
@@ -205,9 +238,23 @@ export class SdkRunDriver {
       return pump;
     } catch (error) {
       deltas.discard();
+      if (!interruption && readyAgent) {
+        closeAgent(readyAgent);
+        await Promise.race([
+          (async () => {
+            for (let index = 0; index < cleanupTasks.length; index += 1) await cleanupTasks[index];
+          })(),
+          interrupted,
+        ]);
+        if (!cleanupSucceeded) {
+          interrupt("cleanup_failed");
+          throw interruption;
+        }
+      }
       throw error;
     } finally {
       input.signal?.removeEventListener("abort", onAbort);
+      session.closedSignal.removeEventListener("abort", onAbort);
       timerController.abort();
       finishAttempt();
       void timer;

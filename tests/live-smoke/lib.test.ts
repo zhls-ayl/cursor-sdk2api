@@ -146,6 +146,13 @@ test("redaction strips keys, bearer, home, and extra canaries", () => {
   expect(obj).toMatchObject({ authorization: "[redacted]", model: "composer-2.5", content: "[redacted]" });
 });
 
+test("live receipts redact bare Cursor credentials without an explicit canary list", () => {
+  const canary = "crsr_synthetic_receipt_canary_12345678";
+  const reason = `upstream rejected ${canary}`;
+  expect(redactSecrets(reason)).toBe("upstream rejected [redacted]");
+  expect(redactValue({ reason })).toEqual({ reason: "upstream rejected [redacted]" });
+});
+
 test("receipt build refuses to emit a canary and omits payload fields", () => {
   const key = "sk-receipt-canary-XYZ12345";
   const cases: SmokeCase[] = [

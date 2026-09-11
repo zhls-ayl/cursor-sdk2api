@@ -7,6 +7,7 @@ import { gatewayGet, postMessages, type GatewayResponse } from "./lib/client.js"
 import { liveSmokeGate } from "./lib/gate.js";
 import { redactSecrets } from "./lib/redact.js";
 import { startChildGateway, type ChildGateway } from "./lib/spawn.js";
+import { installSmokeCleanup } from "./lib/cleanup.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(here, "..", "..");
@@ -98,10 +99,13 @@ async function main(): Promise<void> {
     process.exit(3);
   }
 
-  const child = await startChildGateway({ repoRoot, distEntry, canaries });
+  const cleanup = installSmokeCleanup((error) => {
+    console.error(redactSecrets(error instanceof Error ? error.message : "gateway shutdown failed; temporary state retained", canaries));
+  });
   const cases: CaseRecord[] = [];
   let exitCode = 1;
   try {
+    const child = await startChildGateway({ repoRoot, distEntry, canaries, signal: cleanup.signal, onChild: cleanup.attach });
     const health = await fetch(`${child.baseUrl}/health`, { signal: AbortSignal.timeout(5000) });
     const healthJson = (await health.json()) as {
       sdk_version?: string;
@@ -155,9 +159,16 @@ async function main(): Promise<void> {
     console.error(redactSecrets(error instanceof Error ? error.message : "ordinary live failed", canaries));
     exitCode = 1;
   } finally {
-    await child.stop().catch(() => undefined);
-    child.cleanup();
+    try {
+      await cleanup.finish();
+    } catch (error) {
+      console.error(redactSecrets(error instanceof Error ? error.message : "gateway shutdown failed; temporary state retained", canaries));
+      exitCode = 1;
+    } finally {
+      cleanup.dispose();
+    }
   }
+  if (cleanup.signal.aborted) return;
   process.exit(exitCode);
 }
 

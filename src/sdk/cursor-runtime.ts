@@ -159,6 +159,7 @@ function wrapRun(run: Run, options: { suppressMessageDeltas: boolean }): SdkRun 
 }
 
 function wrapSdkAgent(agent: SDKAgent, fallbackTools: Record<string, SdkCustomTool>): SdkAgent {
+  let closing: Promise<void> | undefined;
   return {
     agentId: agent.agentId,
     async send(sendInput: SdkSendInput) {
@@ -196,7 +197,15 @@ function wrapSdkAgent(agent: SDKAgent, fallbackTools: Record<string, SdkCustomTo
       return wrapRun(run, { suppressMessageDeltas: hasDeltaSink });
     },
     close() {
-      agent.close();
+      closing ??= (async () => {
+        const dispose = agent[Symbol.asyncDispose];
+        if (typeof dispose === "function") {
+          await dispose.call(agent);
+        } else {
+          await agent.close();
+        }
+      })();
+      return closing;
     },
   };
 }

@@ -21,7 +21,7 @@ Optional:
 - `LIVE_SMOKE_OUTPUT` — receipt path. Default is a temp file, not the repository.
 - `LIVE_SMOKE_TIMEOUT_MS` — per-request timeout (default 180000).
 
-Child mode binds **127.0.0.1** on a free port, uses isolated temp `STATE_DIR` / workspace, SIGTERM on exit, then deletes the temp dirs.
+Child mode binds **127.0.0.1** on a free port and uses isolated temp `STATE_DIR` / workspace. Normal exit, SIGINT, and SIGTERM share one cleanup operation: SIGTERM the child, escalate to SIGKILL after the grace period, and wait for its actual `close` event before deleting temp dirs. Shutdown failure retains the sensitive dirs and reports an error. Sending a signal alone does not prove shutdown.
 
 ## What it checks
 

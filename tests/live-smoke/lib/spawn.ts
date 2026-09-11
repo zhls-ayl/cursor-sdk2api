@@ -1,10 +1,11 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn } from "node:child_process";
 import { createServer } from "node:http";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { redactSecrets } from "./redact.js";
 import { proxyEnvironment } from "../../../src/sdk/proxy.js";
+import { ChildProcessLifecycle } from "./process-lifecycle.js";
 
 export interface ChildGateway {
   baseUrl: string;
@@ -36,27 +37,47 @@ export async function startChildGateway(input: {
   distEntry: string;
   canaries: string[];
   readyTimeoutMs?: number;
+  signal?: AbortSignal;
+  onChild?: (child: ChildGateway) => void;
+  stopTimeouts?: { graceMs?: number; killMs?: number };
 }): Promise<ChildGateway> {
+  let port = await freeLoopbackPort();
+  input.signal?.throwIfAborted();
   const stateDir = mkdtempSync(join(tmpdir(), "cursor-sdk2api-smoke-state-"));
   const workspaceDir = mkdtempSync(join(tmpdir(), "cursor-sdk2api-smoke-ws-"));
-  let port = await freeLoopbackPort();
   let child = spawnChild({
     distEntry: input.distEntry,
     repoRoot: input.repoRoot,
     port,
     stateDir,
     workspaceDir,
-  });
+  }, input.stopTimeouts);
 
   const readyTimeoutMs = input.readyTimeoutMs ?? 15_000;
-  try {
-    await waitHealth(`http://127.0.0.1:${port}`, readyTimeoutMs, child, input.canaries);
-  } catch (error) {
-    await stopProcess(child);
-    rmSync(stateDir, { recursive: true, force: true });
-    rmSync(workspaceDir, { recursive: true, force: true });
-    throw error;
-  }
+  const stopping = new AbortController();
+  const signal = input.signal ? AbortSignal.any([input.signal, stopping.signal]) : stopping.signal;
+  let operation = Promise.resolve();
+  let stopPromise: Promise<void> | undefined;
+  let stopConfirmed = false;
+  const restart = (withoutLineage: boolean): Promise<void> => {
+    operation = operation.then(async () => {
+      signal.throwIfAborted();
+      await child.stop();
+      signal.throwIfAborted();
+      if (withoutLineage) rmSync(join(stateDir, "lineage"), { recursive: true, force: true });
+      port = await freeLoopbackPort();
+      signal.throwIfAborted();
+      child = spawnChild({
+        distEntry: input.distEntry,
+        repoRoot: input.repoRoot,
+        port,
+        stateDir,
+        workspaceDir,
+      }, input.stopTimeouts);
+      await waitHealth(`http://127.0.0.1:${port}`, readyTimeoutMs, child, input.canaries, signal);
+    });
+    return operation;
+  };
 
   const handle: ChildGateway = {
     get baseUrl() {
@@ -64,39 +85,36 @@ export async function startChildGateway(input: {
     },
     stateDir,
     workspaceDir,
-    async restart() {
-      await stopProcess(child);
-      port = await freeLoopbackPort();
-      child = spawnChild({
-        distEntry: input.distEntry,
-        repoRoot: input.repoRoot,
-        port,
-        stateDir,
-        workspaceDir,
-      });
-      await waitHealth(`http://127.0.0.1:${port}`, readyTimeoutMs, child, input.canaries);
+    restart() {
+      return restart(false);
     },
-    async restartWithoutLineage() {
-      await stopProcess(child);
-      rmSync(join(stateDir, "lineage"), { recursive: true, force: true });
-      port = await freeLoopbackPort();
-      child = spawnChild({
-        distEntry: input.distEntry,
-        repoRoot: input.repoRoot,
-        port,
-        stateDir,
-        workspaceDir,
-      });
-      await waitHealth(`http://127.0.0.1:${port}`, readyTimeoutMs, child, input.canaries);
+    restartWithoutLineage() {
+      return restart(true);
     },
-    async stop() {
-      await stopProcess(child);
+    stop() {
+      stopping.abort();
+      stopPromise ??= operation.catch(() => undefined).then(async () => {
+        await child.stop();
+        stopConfirmed = true;
+      });
+      return stopPromise;
     },
     cleanup() {
+      if (!stopConfirmed || !child.hasClosed) {
+        throw new Error("Cannot clean temporary state before gateway shutdown has completed");
+      }
       rmSync(stateDir, { recursive: true, force: true });
       rmSync(workspaceDir, { recursive: true, force: true });
     },
   };
+  try {
+    input.onChild?.(handle);
+    await waitHealth(`http://127.0.0.1:${port}`, readyTimeoutMs, child, input.canaries, signal);
+  } catch (error) {
+    await handle.stop();
+    handle.cleanup();
+    throw error;
+  }
   return handle;
 }
 
@@ -106,7 +124,7 @@ function spawnChild(input: {
   port: number;
   stateDir: string;
   workspaceDir: string;
-}): ChildProcess {
+}, stopTimeouts?: { graceMs?: number; killMs?: number }): ChildProcessLifecycle {
   const child = spawn(process.execPath, [input.distEntry], {
     cwd: input.repoRoot,
     env: {
@@ -123,44 +141,35 @@ function spawnChild(input: {
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
+  const lifecycle = new ChildProcessLifecycle(child, stopTimeouts);
   child.stdout?.resume();
   child.stderr?.resume();
-  return child;
+  return lifecycle;
 }
 
 async function waitHealth(
   baseUrl: string,
   timeoutMs: number,
-  child: ChildProcess,
+  child: ChildProcessLifecycle,
   canaries: string[],
+  signal: AbortSignal,
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   let last = "not contacted";
   while (Date.now() < deadline) {
-    if (child.exitCode !== null) {
-      throw new Error(`gateway child exited before ready (${child.exitCode})`);
+    signal.throwIfAborted();
+    if (child.hasClosed || child.spawnFailed || child.child.exitCode !== null || child.child.signalCode !== null) {
+      throw new Error("gateway child exited before ready");
     }
     try {
-      const res = await fetch(`${baseUrl}/health`, { signal: AbortSignal.timeout(1000) });
+      const res = await fetch(`${baseUrl}/health`, { signal: AbortSignal.any([signal, AbortSignal.timeout(1000)]) });
       if (res.ok) return;
       last = `http ${res.status}`;
     } catch (error) {
       last = error instanceof Error ? redactSecrets(error.message, canaries) : "fetch failed";
     }
+    signal.throwIfAborted();
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   throw new Error(`gateway health not ready: ${last}`);
-}
-
-async function stopProcess(child: ChildProcess): Promise<void> {
-  if (child.exitCode !== null || child.killed) return;
-  child.kill("SIGTERM");
-  const deadline = Date.now() + 8_000;
-  while (Date.now() < deadline && child.exitCode === null) {
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
-  if (child.exitCode === null) {
-    child.kill("SIGKILL");
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
 }

@@ -76,6 +76,13 @@ signal, so the gateway blocks later stages and closes/cancels any late Agent/Run
 The same logical request stays blocked and its managed account routing claim is
 retained until pending startup and late cleanup finish. Unsettled startup work
 also retains admission capacity, even though its HTTP response has ended.
+The startup driver owns the Agent until Send resolves; registry sweep/drain
+signals Session closure without disposing an executor still being acquired.
+Late Runs follow `cancel()` → `wait()` → Agent `Symbol.asyncDispose`, including
+a terminal wait when cancellation acknowledgement fails. SDK 1.0.30 `close()`
+alone is fire-and-forget and does not confirm lease disposal. Failed cleanup
+keeps the retry/admission gate closed; ordinary startup errors also retain their
+deadline while disposal is pending.
 After a durable ledger Run is bound, the existing observe-after-disconnect contract
 still applies. Shared tool recovery remains owned by its singleflight operation;
 one disconnected subscriber does not cancel that shared startup.

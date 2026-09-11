@@ -147,7 +147,7 @@ export class SessionRegistry {
       pending.reject(Object.assign(new Error(reason), { name: "SessionClosedError" }));
     }
     try {
-      session.agent?.close();
+      void Promise.resolve(session.agent?.close()).catch(() => undefined);
     } catch {
       // best-effort
     }

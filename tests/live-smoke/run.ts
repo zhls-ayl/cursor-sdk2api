@@ -11,6 +11,7 @@ import { buildReceipt, exitCodeFor, type SmokeCase } from "./lib/receipt.js";
 import { redactSecrets } from "./lib/redact.js";
 import { sseShapeOk } from "./lib/sse.js";
 import { startChildGateway, type ChildGateway } from "./lib/spawn.js";
+import { installSmokeCleanup } from "./lib/cleanup.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(here, "..", "..");
@@ -46,6 +47,9 @@ async function main(): Promise<void> {
   let gatewayVersion: string | undefined;
   let sdkVersion: string | undefined;
   let exitCode = 1;
+  const cleanup = installSmokeCleanup((error) => {
+    console.error(redactSecrets(error instanceof Error ? error.message : "gateway shutdown failed; temporary state retained", canaries));
+  });
 
   try {
     if (!attach) {
@@ -54,7 +58,7 @@ async function main(): Promise<void> {
         console.error("dist/index.js is missing. Run npm run build before live:smoke.");
         process.exit(3);
       }
-      child = await startChildGateway({ repoRoot, distEntry, canaries });
+      child = await startChildGateway({ repoRoot, distEntry, canaries, signal: cleanup.signal, onChild: cleanup.attach });
       baseUrl = child.baseUrl;
     } else {
       const url = new URL(attach);
@@ -161,11 +165,16 @@ async function main(): Promise<void> {
     console.error(message);
     exitCode = 1;
   } finally {
-    if (child) {
-      await child.stop().catch(() => undefined);
-      child.cleanup();
+    try {
+      await cleanup.finish();
+    } catch (error) {
+      console.error(redactSecrets(error instanceof Error ? error.message : "gateway shutdown failed; temporary state retained", canaries));
+      exitCode = 1;
+    } finally {
+      cleanup.dispose();
     }
   }
+  if (cleanup.signal.aborted) return;
   process.exit(exitCode);
 }
 

@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from "vitest";
-import { assertNoSecretLeak } from "../../src/log.js";
-import { redactSecrets } from "../../src/errors.js";
+import { assertNoSecretLeak, sanitize } from "../../src/log.js";
+import { redactSecrets, sdkFailure, toOpenAIErrorBody, toPublicErrorBody } from "../../src/errors.js";
 import { api, closeTestApp, startTestApp, weatherTool, type TestContext } from "../helpers/app.js";
 
 let ctx: TestContext | undefined;
@@ -62,8 +62,7 @@ test("error envelope never echoes the API key", async () => {
   expect(raw).toContain("request_id");
 });
 
-test("mid-stream SDK errors redact secret-like text", async () => {
-  const canary = "sk-stream-secret-ABCDEFGH";
+test.each(["sk-stream-secret-ABCDEFGH", "crsr_synthetic_stream_canary_12345678"])("mid-stream SDK errors redact secret-like text (%s)", async (canary) => {
   ctx = await startTestApp({
     sdk: { scripts: [[{ type: "text", chunks: ["partial"] }, { type: "error", message: `failed ${canary}` }]] },
   });
@@ -81,6 +80,22 @@ test("mid-stream SDK errors redact secret-like text", async () => {
   expect(body).toContain("event: error");
   expect(body).not.toContain(canary);
   expect(body).toContain("[redacted]");
+});
+
+test("bare Cursor credentials are redacted from error envelopes and nested log fields", () => {
+  const canary = "crsr_synthetic_redaction_canary_12345678";
+  const raw = `upstream rejected (${canary}), request failed`;
+  expect(redactSecrets(raw)).toBe("upstream rejected ([redacted]), request failed");
+  const error = sdkFailure(new Error(raw));
+  const values = [
+    toPublicErrorBody(error, "synthetic-request"),
+    toOpenAIErrorBody(error, "synthetic-request"),
+    sanitize({ error: { detail: raw }, attempts: [raw] }),
+  ];
+  for (const value of values) {
+    expect(JSON.stringify(value)).not.toContain(canary);
+    expect(JSON.stringify(value)).toContain("[redacted]");
+  }
 });
 
 test("proxy URL credentials are redacted from public errors", () => {

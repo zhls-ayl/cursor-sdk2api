@@ -162,6 +162,7 @@ function reconstructFromSse(events: SseEvent[]): unknown {
   const message = { ...(start?.message ?? { type: "message", role: "assistant", content: [] }) };
   const content: Array<Record<string, unknown>> = [];
   const open = new Map<number, Record<string, unknown>>();
+  const toolInputs = new Map<number, string>();
   for (const event of events) {
     const data = event.data as Record<string, unknown> | null;
     if (!data) continue;
@@ -171,7 +172,7 @@ function reconstructFromSse(events: SseEvent[]): unknown {
       content[data.index] = block;
     } else if (event.event === "content_block_delta" && typeof data.index === "number") {
       const block = open.get(data.index) ?? { type: "text", text: "" };
-      const delta = data.delta as { type?: string; text?: string; thinking?: string } | undefined;
+      const delta = data.delta as { type?: string; text?: string; thinking?: string; partial_json?: string } | undefined;
       if (delta?.type === "text_delta" && typeof delta.text === "string") {
         block.text = `${typeof block.text === "string" ? block.text : ""}${delta.text}`;
         block.type = "text";
@@ -180,8 +181,21 @@ function reconstructFromSse(events: SseEvent[]): unknown {
         block.thinking = `${typeof block.thinking === "string" ? block.thinking : ""}${delta.thinking}`;
         block.type = "thinking";
       }
+      if (delta?.type === "input_json_delta" && typeof delta.partial_json === "string") {
+        toolInputs.set(data.index, (toolInputs.get(data.index) ?? "") + delta.partial_json);
+      }
       open.set(data.index, block);
       content[data.index] = block;
+    } else if (event.event === "content_block_stop" && typeof data.index === "number") {
+      const input = toolInputs.get(data.index);
+      const block = open.get(data.index);
+      if (input !== undefined && block?.type === "tool_use") {
+        try {
+          block.input = JSON.parse(input);
+        } catch {
+          throw new Error("Invalid streamed tool input JSON");
+        }
+      }
     } else if (event.event === "message_delta") {
       const delta = data.delta as { stop_reason?: string } | undefined;
       if (delta?.stop_reason) message.stop_reason = delta.stop_reason;
